@@ -1,0 +1,12 @@
+{
+  "format": "openfusion-native",
+  "version": 1,
+  "name": "Block",
+  "units": "mm",
+  "sketches": [
+    { "id": 1, "name": "Sketch1", "plane": "XY", "origin": [0, 0, 0], "profiles": [{ "type": "rectangle", "a": [0, 0], "b": [40, 30] }] }
+  ],
+  "extrusions": [
+    { "id": 2, "name": "Extrude1", "sketch_id": 1, "profile": 0, "distance": 5, "operation": "NewBody", "body_id": 3 }
+  ]
+}

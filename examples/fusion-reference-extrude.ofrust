@@ -1,0 +1,26 @@
+{
+  "format": "openfusion-native",
+  "version": 1,
+  "name": "Fusion reference: rectangle extrusion",
+  "units": "mm",
+  "sketches": [
+    {
+      "id": 1,
+      "name": "40 x 20 mm rectangle",
+      "plane": "XY",
+      "origin": [0, 0, 0],
+      "profiles": [{ "type": "rectangle", "a": [0, 0], "b": [40, 20] }]
+    }
+  ],
+  "extrusions": [
+    {
+      "id": 2,
+      "name": "6 mm extrusion",
+      "sketch_id": 1,
+      "profile": 0,
+      "distance": 6,
+      "operation": "NewBody",
+      "body_id": 3
+    }
+  ]
+}

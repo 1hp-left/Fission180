@@ -1,0 +1,20 @@
+[package]
+name = "fission180-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "fission180"
+
+[[bin]]
+name = "fission180"
+path = "src/main.rs"
+
+[dependencies]
+fission180-core = { path = "../openfusion-core" }
+eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+serde_json = "1"
+rfd = "0.17"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"
