@@ -276,6 +276,21 @@ fn reverse(boundary: &mut [Coedge]) {
     }
 }
 impl NativeSolid {
+    pub fn translated(&self, offset: [f64; 3], feature: u64) -> Result<Self> {
+        let mut input = self.input.clone();
+        for (v, o) in input.origin.iter_mut().zip(offset) {
+            *v += o;
+        }
+        input.feature_id = feature;
+        let mut result = Self::extrude(input)?;
+        result.provenance = self.provenance.clone();
+        result.provenance.push(Provenance {
+            feature,
+            operation: Operation::NewBody,
+            parents: vec![self.input.feature_id],
+        });
+        Ok(result)
+    }
     pub fn topology(&self) -> &Brep {
         &self.topology
     }

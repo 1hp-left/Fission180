@@ -122,6 +122,7 @@ impl Geometry {
                     indices: mesh.indices,
                     edges: mesh.edges.iter().map(|v| v.to_array()).collect(),
                     face_ids: vec![None; count],
+                    body_ids: vec![],
                     edge_ids: vec![],
                 })
             }

@@ -5,6 +5,7 @@ use std::{collections::HashSet, io::Cursor, path::Path};
 
 pub const EPS: f64 = 1e-5;
 pub mod expression;
+pub mod features;
 pub mod kernel;
 pub mod persistence;
 pub mod region;
@@ -159,6 +160,8 @@ pub struct Sketch {
         std::collections::BTreeMap<u64, std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub graph: Option<sketch::SketchGraph>,
+    #[serde(default)]
+    pub support: Option<features::PlanarSupport>,
 }
 fn first_id() -> u64 {
     1
@@ -175,6 +178,7 @@ impl Default for Sketch {
             next_profile_id: 1,
             dimension_expressions: Default::default(),
             graph: None,
+            support: None,
         }
     }
 }
@@ -227,22 +231,66 @@ pub struct Document {
     pub parameters: expression::Parameters,
     #[serde(default)]
     pub backend: Backend,
+    #[serde(default)]
+    pub features: Vec<features::Feature>,
+    #[serde(default)]
+    pub timeline: Vec<u64>,
+    #[serde(default)]
+    pub suppressed: std::collections::BTreeSet<u64>,
 }
 impl Default for Document {
     fn default() -> Self {
         Self {
             format: "openfusion-native".into(),
-            version: 2,
+            version: 3,
             name: "Untitled".into(),
             units: "mm".into(),
             sketches: vec![],
             extrusions: vec![],
             parameters: Default::default(),
             backend: Backend::Occt,
+            features: vec![],
+            timeline: vec![],
+            suppressed: Default::default(),
         }
     }
 }
 impl Document {
+    pub fn feature_order(&self) -> Result<Vec<u64>> {
+        if self.timeline.is_empty() {
+            return Ok(self
+                .extrusions
+                .iter()
+                .map(|e| e.id)
+                .chain(self.features.iter().map(|f| f.id))
+                .collect());
+        }
+        let expected: HashSet<_> = self
+            .extrusions
+            .iter()
+            .map(|e| e.id)
+            .chain(self.features.iter().map(|f| f.id))
+            .collect();
+        let actual: HashSet<_> = self.timeline.iter().copied().collect();
+        if actual != expected || actual.len() != self.timeline.len() {
+            return invalid("Timeline references are missing, duplicate or invalid");
+        }
+        Ok(self.timeline.clone())
+    }
+    pub fn push_feature(&mut self, feature: features::Feature) -> Result<()> {
+        if self.timeline.is_empty() {
+            self.timeline = self.feature_order()?;
+        }
+        self.timeline.push(feature.id);
+        self.features.push(feature);
+        Ok(())
+    }
+    pub fn push_extrusion(&mut self, extrusion: Extrusion) {
+        if !self.timeline.is_empty() {
+            self.timeline.push(extrusion.id);
+        }
+        self.extrusions.push(extrusion);
+    }
     pub fn recomputed(&self) -> Result<Self> {
         let mut d = self.upgraded()?;
         for s in &mut d.sketches {
@@ -269,6 +317,11 @@ impl Document {
     }
     /// Resolve all v1 positional references before generating any regions.
     pub fn upgraded(&self) -> Result<Self> {
+        if self.version == 2 {
+            let mut d = self.clone();
+            d.version = 3;
+            return Ok(d);
+        }
         if self.version != 1 {
             return Ok(self.clone());
         }
@@ -294,7 +347,7 @@ impl Document {
             }
             e.region_id = Some(region.id);
         }
-        d.version = 2;
+        d.version = 3;
         Ok(d)
     }
     pub fn next_id(&self) -> Result<u64> {
@@ -303,6 +356,8 @@ impl Document {
             .map(|s| s.id)
             .chain(self.extrusions.iter().map(|e| e.id))
             .chain(self.extrusions.iter().map(|e| e.body_id))
+            .chain(self.features.iter().map(|f| f.id))
+            .chain(self.features.iter().flat_map(|f| f.outputs.iter().copied()))
             .chain(
                 self.extrusions
                     .iter()
@@ -315,12 +370,13 @@ impl Document {
     }
     pub fn validate(&self) -> Result<()> {
         if self.format != "openfusion-native"
-            || ![1, 2].contains(&self.version)
+            || ![1, 2, 3].contains(&self.version)
             || self.units != "mm"
         {
             return invalid("Unsupported document format, version, or units");
         }
-        if self.sketches.len() > 1000 || self.extrusions.len() > 1000 {
+        if self.sketches.len() > 1000 || self.extrusions.len() > 1000 || self.features.len() > 1000
+        {
             return invalid("Document exceeds feature limit");
         }
         if self.parameters.len() > 256 {
@@ -348,10 +404,21 @@ impl Document {
             for n in s.origin {
                 number(n)?;
             }
+            if let Some(support) = &s.support {
+                number(support.offset)?;
+                let expected = match support.axis {
+                    features::Axis::X => Plane::YZ,
+                    features::Axis::Y => Plane::XZ,
+                    features::Axis::Z => Plane::XY,
+                };
+                if s.plane != expected {
+                    return invalid("Sketch support axis does not match its plane");
+                }
+            }
             for p in &s.profiles {
                 p.validate()?;
             }
-            if self.version == 2 {
+            if self.version >= 2 {
                 let unique: HashSet<_> = s.profile_ids.iter().copied().collect();
                 if unique.len() != s.profile_ids.len()
                     || unique.contains(&0)
@@ -390,7 +457,7 @@ impl Document {
             if self.version == 1 && e.profile >= s.profiles.len() {
                 return invalid("Extrusion references a missing profile");
             }
-            if self.version == 2 {
+            if self.version >= 2 {
                 s.region(
                     e.region_id
                         .ok_or_else(|| Error::Invalid("Missing stable region reference".into()))?,
@@ -404,6 +471,16 @@ impl Document {
                 }
             }
         }
+        for f in &self.features {
+            if !ids.insert(f.id) {
+                return invalid("Duplicate feature ID");
+            }
+            f.validate(self)?;
+        }
+        let order = self.feature_order()?;
+        if self.suppressed.iter().any(|id| !order.contains(id)) {
+            return invalid("Suppression references a missing feature");
+        }
         Ok(())
     }
     pub fn from_json(json: &str) -> Result<Self> {
@@ -414,6 +491,33 @@ impl Document {
     }
     pub fn to_json(&self) -> Result<String> {
         self.validate()?;
+        if self.version == 1 {
+            if !self.features.is_empty()
+                || !self.parameters.is_empty()
+                || self.backend != Backend::Occt
+                || !self.timeline.is_empty()
+                || !self.suppressed.is_empty()
+                || self.sketches.iter().any(|s| {
+                    s.support.is_some() || !s.dimension_expressions.is_empty() || s.graph.is_some()
+                })
+                || self
+                    .extrusions
+                    .iter()
+                    .any(|e| e.distance_expression.is_some())
+            {
+                return invalid(
+                    "Legacy v1 cannot encode these feature/parameter/backend extensions",
+                );
+            }
+            let sketches:Vec<_>=self.sketches.iter().map(|s|serde_json::json!({"id":s.id,"name":s.name,"plane":s.plane,"origin":s.origin,"profiles":s.profiles})).collect();
+            let extrusions:Vec<_>=self.extrusions.iter().map(|e|serde_json::json!({"id":e.id,"name":e.name,"sketch_id":e.sketch_id,"profile":e.profile,"distance":e.distance,"operation":e.operation,"body_id":e.body_id})).collect();
+            return Ok(serde_json::to_string_pretty(
+                &serde_json::json!({"format":self.format,"version":1,"name":self.name,"units":self.units,"sketches":sketches,"extrusions":extrusions}),
+            )?);
+        }
+        if self.version == 2 {
+            return self.upgraded()?.to_json();
+        }
         Ok(serde_json::to_string_pretty(self)?)
     }
 }
@@ -432,6 +536,7 @@ pub struct DisplayMesh {
     pub indices: Vec<usize>,
     pub edges: Vec<[f64; 3]>,
     pub face_ids: Vec<Option<kernel::native::TopologyId>>,
+    pub body_ids: Vec<u64>,
     pub edge_ids: Vec<kernel::native::TopologyId>,
 }
 #[derive(Clone, Debug)]
@@ -456,13 +561,95 @@ impl Model {
         let mut document = document.upgraded()?;
         document.validate()?;
         let mut bodies: Vec<Body> = vec![];
-        for feature_index in 0..document.extrusions.len() {
-            let e = document.extrusions[feature_index].clone();
-            let s = document
-                .sketches
+        for id in document.feature_order()? {
+            if document.suppressed.contains(&id) {
+                continue;
+            }
+            for i in 0..document.sketches.len() {
+                if document.sketches[i]
+                    .support
+                    .as_ref()
+                    .is_some_and(|s| bodies.iter().any(|b| b.id == s.body_id))
+                {
+                    document.sketches[i] =
+                        document.resolved_sketch(document.sketches[i].id, &bodies)?;
+                }
+            }
+            if let Some(i) = document.features.iter().position(|f| f.id == id) {
+                let feature = document.features[i].clone();
+                let mut outcome = feature.evaluate(&document, &bodies)?;
+                if matches!(
+                    feature.kind,
+                    features::FeatureKind::SplitBody { .. }
+                        | features::FeatureKind::Combine { .. }
+                        | features::FeatureKind::Hole { .. }
+                ) {
+                    outcome.solids.sort_by(|a, b| {
+                        a.bounds()
+                            .into_iter()
+                            .flatten()
+                            .zip(b.bounds().into_iter().flatten())
+                            .map(|(a, b)| a.total_cmp(&b))
+                            .find(|o| !o.is_eq())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                let outputs = if feature.outputs.len() != outcome.solids.len() {
+                    if !allocate_outputs {
+                        return invalid(
+                            "Feature output identities must be materialized before replay",
+                        );
+                    }
+                    let mut outputs = feature.outputs.clone();
+                    outputs.truncate(outcome.solids.len());
+                    let mut next = document.next_id()?;
+                    if let Some(target) = feature.target.filter(|id| outcome.removed.contains(id)) {
+                        if outputs.is_empty() && !outcome.solids.is_empty() {
+                            outputs.push(target);
+                        }
+                    }
+                    while outputs.len() < outcome.solids.len() {
+                        outputs.push(next);
+                        next = next
+                            .checked_add(1)
+                            .ok_or_else(|| Error::Invalid("Document ID space exhausted".into()))?;
+                    }
+                    document.features[i].outputs = outputs.clone();
+                    outputs
+                } else {
+                    if feature.outputs.len() != outcome.solids.len() {
+                        return invalid(
+                            "Feature result count changed; repair output references explicitly",
+                        );
+                    }
+                    feature.outputs.clone()
+                };
+                bodies.retain(|b| !outcome.removed.contains(&b.id));
+                for (mut solid, id) in outcome.solids.into_iter().zip(outputs) {
+                    if bodies.iter().any(|b| b.id == id) {
+                        return invalid("Feature output body identity collides");
+                    }
+                    if !solid.volume().is_finite() || solid.volume() <= 0. {
+                        return invalid("Feature produced an invalid solid");
+                    }
+                    if let Geometry::Rust(s) = &mut solid {
+                        s.bind_body(id);
+                    }
+                    bodies.push(Body {
+                        id,
+                        name: format!("Body{id}"),
+                        solid,
+                    });
+                }
+                continue;
+            }
+            let feature_index = document
+                .extrusions
                 .iter()
-                .find(|s| s.id == e.sketch_id)
-                .unwrap();
+                .position(|e| e.id == id)
+                .ok_or_else(|| Error::Invalid("Missing timeline extrusion".into()))?;
+            let e = document.extrusions[feature_index].clone();
+            let s = document.resolved_sketch(e.sketch_id, &bodies)?;
             let region = s.region(e.region_id.unwrap())?;
             let tool = document.backend.extrude(&ExtrudeInput {
                 feature_id: e.id,
@@ -583,6 +770,9 @@ impl Model {
             combined.normals.extend(m.normals);
             combined.edges.extend(m.edges);
             combined.face_ids.extend(m.face_ids);
+            combined
+                .body_ids
+                .extend(std::iter::repeat_n(b.id, m.indices.len() / 3));
             combined.edge_ids.extend(m.edge_ids);
         }
         Ok(combined)
@@ -788,6 +978,7 @@ mod tests {
                 next_profile_id: 2,
                 dimension_expressions: Default::default(),
                 graph: None,
+                support: None,
             }],
             extrusions: vec![Extrusion {
                 id: 2,
@@ -830,6 +1021,7 @@ mod tests {
                 next_profile_id: 2,
                 dimension_expressions: Default::default(),
                 graph: None,
+                support: None,
             });
             d.extrusions.push(Extrusion {
                 id: 5,

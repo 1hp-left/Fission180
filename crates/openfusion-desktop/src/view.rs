@@ -5,6 +5,61 @@ use fission180_core::{DisplayMesh, Plane};
 pub enum Pick {
     Face(TopologyId),
     Edge(TopologyId),
+    Body(u64),
+}
+pub fn planar_surface(
+    camera: Camera,
+    r: Rect,
+    source: &DisplayMesh,
+    at: Pos2,
+) -> Option<(Plane, [f64; 3], u64)> {
+    let mut result: Option<(f64, Plane, [f64; 3], u64)> = None;
+    let mut front_depth = f64::NEG_INFINITY;
+    for (index, ids) in source.indices.chunks_exact(3).enumerate() {
+        let points = [ids[0], ids[1], ids[2]].map(|i| camera.project(source.vertices[i], r));
+        let v0 = points[1].0 - points[0].0;
+        let v1 = points[2].0 - points[0].0;
+        let v2 = at - points[0].0;
+        let det = v0.x * v1.y - v1.x * v0.y;
+        if det.abs() < 1e-8 {
+            continue;
+        }
+        let u = (v2.x * v1.y - v1.x * v2.y) / det;
+        let v = (v0.x * v2.y - v2.x * v0.y) / det;
+        if u < 0. || v < 0. || u + v > 1. {
+            continue;
+        }
+        let depth =
+            points[0].1 * (1. - u - v) as f64 + points[1].1 * u as f64 + points[2].1 * v as f64;
+        if depth < front_depth {
+            continue;
+        }
+        front_depth = depth;
+        result = None;
+        let normal = source.normals.get(ids[0])?;
+        let axis = (0..3).max_by(|a, b| normal[*a].abs().total_cmp(&normal[*b].abs()))?;
+        if normal[axis].abs() < 1. - 1e-8 {
+            continue;
+        }
+        let coordinate = source.vertices[ids[0]][axis];
+        if ids
+            .iter()
+            .any(|id| (source.vertices[*id][axis] - coordinate).abs() > 1e-5)
+        {
+            continue;
+        }
+        let plane = match axis {
+            0 => Plane::YZ,
+            1 => Plane::XZ,
+            _ => Plane::XY,
+        };
+        let mut origin = [0.; 3];
+        origin[axis] = coordinate;
+        if result.as_ref().is_none_or(|t| depth > t.0) {
+            result = Some((depth, plane, origin, *source.body_ids.get(index)?));
+        }
+    }
+    result.map(|(_, plane, origin, body)| (plane, origin, body))
 }
 
 pub fn pick(camera: Camera, r: Rect, source: &DisplayMesh, at: Pos2) -> Option<Pick> {
@@ -13,7 +68,7 @@ pub fn pick(camera: Camera, r: Rect, source: &DisplayMesh, at: Pos2) -> Option<P
         .iter()
         .map(|p| camera.project(*p, r))
         .collect();
-    let mut nearest: Option<(f64, Option<TopologyId>)> = None;
+    let mut nearest: Option<(f64, Option<TopologyId>, u64)> = None;
     for (index, ids) in source.indices.chunks_exact(3).enumerate() {
         let [a, b, c] = [vertices[ids[0]], vertices[ids[1]], vertices[ids[2]]];
         let v0 = b.0 - a.0;
@@ -28,7 +83,11 @@ pub fn pick(camera: Camera, r: Rect, source: &DisplayMesh, at: Pos2) -> Option<P
         if u >= 0. && v >= 0. && u + v <= 1. {
             let depth = a.1 * (1. - u - v) as f64 + b.1 * u as f64 + c.1 * v as f64;
             if nearest.as_ref().is_none_or(|n| depth > n.0) {
-                nearest = Some((depth, source.face_ids.get(index).copied().flatten()));
+                nearest = Some((
+                    depth,
+                    source.face_ids.get(index).copied().flatten(),
+                    source.body_ids.get(index).copied().unwrap_or(0),
+                ));
             }
         }
     }
@@ -49,9 +108,12 @@ pub fn pick(camera: Camera, r: Rect, source: &DisplayMesh, at: Pos2) -> Option<P
             }
         }
     }
-    edge_hit
-        .map(|(_, id)| Pick::Edge(id))
-        .or_else(|| nearest.and_then(|(_, id)| id.map(Pick::Face)))
+    edge_hit.map(|(_, id)| Pick::Edge(id)).or_else(|| {
+        nearest.and_then(|(_, id, body)| {
+            id.map(Pick::Face)
+                .or_else(|| (body != 0).then_some(Pick::Body(body)))
+        })
+    })
 }
 #[derive(Clone, Copy, PartialEq)]
 pub struct Camera {

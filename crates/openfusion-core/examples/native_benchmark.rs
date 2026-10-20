@@ -16,6 +16,7 @@ fn main() {
         next_profile_id: 2,
         dimension_expressions: Default::default(),
         graph: None,
+        support: None,
     });
     doc.extrusions.push(Extrusion {
         id: 2,
@@ -44,6 +45,7 @@ fn main() {
         next_profile_id: 2,
         dimension_expressions: Default::default(),
         graph: None,
+        support: None,
     });
     doc.extrusions.push(Extrusion {
         id: 5,

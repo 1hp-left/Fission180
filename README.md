@@ -1,6 +1,6 @@
 # Fission 180
 
-Formerly OpenFusion. The active Cargo packages are `fission180-core` and `fission180-desktop`, and the executable is `fission180.exe`. The `openfusion-native` identifier is retained. Version-1 documents have explicit in-memory migration; new saves use version 2 for stable references, constraints and expressions. Source directories and external evidence paths retain their original names so audit links remain usable. The archived TypeScript prototype retains its historical identity.
+Formerly OpenFusion. The active Cargo packages are `fission180-core` and `fission180-desktop`, and the executable is `fission180.exe`. The `openfusion-native` identifier is retained. Version-1 and version-2 documents have explicit in-memory migration; new saves use version 3 for stable references, constraints, expressions and ordered solid commands. Source directories and external evidence paths retain their original names so audit links remain usable. The archived TypeScript prototype retains its historical identity.
 
 The [Fusion architecture and kernel research](docs/fusion-engine-research-2026-10-19.md) explains the current OCCT choice and the proposed path toward an independently written Rust kernel while pursuing measured 1:1 Fusion behavior.
 
@@ -36,15 +36,15 @@ Build requirements: Rust 1.95 or newer and a Windows MSVC C++ toolchain. The fir
 
 Geometry work and meshing run on a dedicated worker thread. A failed geometry edit retains the last valid committed model. Display meshes and projected triangles are cached; the event-driven window does not continuously redraw while idle. Dimensions are millimetres.
 
-Double-click a sketch in the Browser or timeline to edit it. The next geometry commit replays its dependent extrusions. Sketch Undo/Redo reverses complete accepted edits, including dimension expressions and constraints. Double-click an extrusion timeline item to edit/replay it.
+Double-click a sketch in the Browser or timeline to edit it. The next geometry commit replays dependent solid commands. Sketch Undo/Redo reverses complete accepted edits, including dimension expressions and constraints. Double-click a solid timeline item to edit/replay it; its context menu suppresses or deletes it with its dependents. Create Sketch also accepts principal planar body faces. Change Parameters edits persisted named length expressions.
 
 ## Current scope
 
 The desktop shell reproduces the observed title/quick-access bars, workspace tabs, ribbon groups, Browser tree, view cube, grid, navigation strip, timeline, Sketch Palette, plane selection, and docked Extrude layout. Icons are independently drawn vectors; they are not Autodesk image assets.
 
-Working modeling features: rectangles, circles, closed polygons, XY/XZ/YZ sketches, positive/negative extrusion, new bodies, union/cut/intersection, dimensional edits, feature replay, local save/load, STEP/STL export, and model undo/redo.
+Working modeling features: rectangles, circles, open line paths, closed polygons, XY/XZ/YZ and principal face sketches, positive/negative extrusion, revolve, sweep, loft, holes, all-edge fillet/chamfer, shell, principal-face Press Pull, translation/copy, mirror, rectangular/circular body patterns, Combine, Split Body, analytic Measure, parameters, dependency replay, local save/load, OCCT STEP/STL export, and model undo/redo. [Command implementation and backend limits](docs/features-2026-10-19.md) lists the exact supported cases.
 
-Many ribbon controls are visual scaffolding. Unsupported actions have an explanatory tooltip or disabled menu entry. Fillets, revolutions, shelling, assemblies, CAM, simulation, face-based sketches and Fusion document import are not implemented. Initial graph constraints and Rust topology picking exist; general constraint editing and robust OCCT topology naming are incomplete. Boolean features handle empty and multiple results with persisted output references. The home screen is only a local-workspace scaffold.
+Many ribbon controls remain visual scaffolding. Unsupported actions have an explanatory tooltip or disabled menu entry. Assemblies, CAM, simulation, general surfaces, drawings and Fusion document import remain absent. Initial graph constraints and Rust topology picking exist; general constraint editing and robust OCCT topology naming are incomplete. Boolean features handle empty and multiple results with persisted output references. The home screen is only a local-workspace scaffold.
 
 ## Verification
 

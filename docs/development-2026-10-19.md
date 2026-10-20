@@ -4,6 +4,8 @@ This implements part of the research plan. Full visual/behavioral parity and com
 
 Evidence directory: `C:/Users/Vnm4/Downloads/openfusion-reference/development-2026-10-19`. Autodesk binaries/assets remain outside the repository.
 
+This records the initial engine commit. The subsequent [solid command implementation](features-2026-10-19.md) supersedes its version-2-only scope, missing Parameters UI, extrusion-only timeline and missing OCCT body picking. New saves now use version 3. The previously pending app-owned screenshot eventually completed as `fission-rectangle-rust.png`: inspected at 1920×1080, it shows the Rust rectangle fixture and 7200.00 mm³ status. This confirms a rendered reopened fixture, not matched-camera Fusion parity or interactive Save/Open verification.
+
 ## Implemented and regression tested
 
 | Area | Implemented behavior | Evidence / remaining boundary |

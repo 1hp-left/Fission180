@@ -11,6 +11,8 @@ use fission180_core::{
     BodyInfo, DisplayMesh, Document, Extrusion, Operation, Plane, Profile, Sketch,
 };
 use std::path::PathBuf;
+#[path = "commands.rs"]
+mod commands;
 
 const RIBBON: C = C::from_rgb(58, 68, 83);
 const QUICK: C = C::from_rgb(34, 41, 51);
@@ -180,6 +182,8 @@ pub struct FusionApp {
     selected_topology: Option<Pick>,
     hovered_topology: Option<Pick>,
     extrude: Option<ExtrudeDialog>,
+    modeling: Option<commands::ModelingDialog>,
+    pending_modeling: Option<String>,
     menu: Option<(&'static str, Pos2)>,
     tab: &'static str,
     home: bool,
@@ -274,6 +278,8 @@ impl FusionApp {
             selected_topology: None,
             hovered_topology: None,
             extrude: None,
+            modeling: None,
+            pending_modeling: None,
             menu: None,
             tab: "SOLID",
             home: false,
@@ -335,6 +341,7 @@ impl FusionApp {
                 next_profile_id: 2,
                 dimension_expressions: Default::default(),
                 graph: None,
+                support: None,
             });
             d.extrusions.push(Extrusion {
                 id: 2,
@@ -350,6 +357,15 @@ impl FusionApp {
                 result_body_ids: vec![],
             });
             app.send(Command::Replace(d));
+        }
+        if let Some(i) = args.iter().position(|a| a == "--command") {
+            if let Some(name) = args.get(i + 1) {
+                if app.busy {
+                    app.pending_modeling = Some(name.clone());
+                } else {
+                    app.start_modeling(name);
+                }
+            }
         }
         app
     }
@@ -381,6 +397,7 @@ impl FusionApp {
             next_profile_id: 1,
             dimension_expressions: Default::default(),
             graph: None,
+            support: None,
         });
         self.mode = Mode::Sketch;
         self.tool = Tool::Select;
@@ -420,6 +437,9 @@ impl FusionApp {
             self.pending_extrude = true;
             self.finish_sketch();
             return;
+        }
+        if self.modeling.take().is_some() || self.preview {
+            self.send(Command::ResetPreview);
         }
         let selection = self.selected.or_else(|| {
             self.document
@@ -498,11 +518,15 @@ impl FusionApp {
             *current = feature;
             current.name = name;
         } else {
-            d.extrusions.push(feature);
+            d.push_extrusion(feature);
         }
         Some(d)
     }
     fn cancel(&mut self) {
+        if self.modeling.take().is_some() {
+            self.send(Command::ResetPreview);
+            return;
+        }
         if self.extrude.take().is_some() || self.preview {
             self.send(Command::ResetPreview);
         } else if self.anchor.take().is_some() || !self.polyline.is_empty() {
@@ -582,7 +606,9 @@ impl FusionApp {
         }
         // Clicked ribbon and dialog buttons can retain keyboard focus. Only
         // suppress canvas shortcuts while an editable command panel is open.
-        if ctx.egui_wants_keyboard_input() && (self.extrude.is_some() || self.show_dimension) {
+        if ctx.egui_wants_keyboard_input()
+            && (self.extrude.is_some() || self.modeling.is_some() || self.show_dimension)
+        {
             return;
         }
         if ctrl_shortcut(ctx, Key::S) {
@@ -602,6 +628,9 @@ impl FusionApp {
         }
         if ctx.input(|i| !i.modifiers.ctrl && i.key_pressed(Key::E)) {
             self.start_extrude();
+        }
+        if ctx.input(|i| !i.modifiers.ctrl && i.key_pressed(Key::H)) {
+            self.start_modeling("Hole");
         }
         if self.mode == Mode::Sketch {
             if ctx.input(|i| i.key_pressed(Key::R)) {
@@ -965,7 +994,10 @@ impl FusionApp {
                 (349., Icon::Sphere, "Create Form"),
                 (392., Icon::Scissors, "Sheet Metal"),
             ] {
-                tool_button(ui, rect(x, 80., 36., 36.), k, name, false, false);
+                let enabled = matches!(name, "Revolve" | "Hole" | "Rectangular Pattern");
+                if tool_button(ui, rect(x, 80., 36., 36.), k, name, false, enabled) {
+                    self.start_modeling(name);
+                }
             }
             for (x, k, name) in [
                 (446., Icon::Extrude, "Press Pull"),
@@ -976,7 +1008,9 @@ impl FusionApp {
                 (661., Icon::Move, "Move / Copy"),
                 (704., Icon::Table, "Change Parameters"),
             ] {
-                tool_button(ui, rect(x, 80., 36., 36.), k, name, false, false);
+                if tool_button(ui, rect(x, 80., 36., 36.), k, name, false, true) {
+                    self.start_modeling(name);
+                }
             }
             self.group_label(ui, &p, "CREATE", 134., 304.);
             self.group_label(ui, &p, "MODIFY", 442., 305.);
@@ -995,7 +1029,16 @@ impl FusionApp {
                 (997., Icon::Measure, "Measure"),
                 (1040., Icon::Construct, "Section Analysis"),
             ] {
-                tool_button(ui, rect(x, 80., 36., 36.), k, name, false, false);
+                if tool_button(
+                    ui,
+                    rect(x, 80., 36., 36.),
+                    k,
+                    name,
+                    false,
+                    name == "Measure",
+                ) {
+                    self.start_modeling(name);
+                }
             }
             self.group_label(ui, &p, "INSPECT", 992., 92.);
             for (x, k, name) in [
@@ -1027,14 +1070,16 @@ impl FusionApp {
             );
             self.group_label(ui, &p, "CONSTRUCT", base - 29., 94.);
             let base = base + 77.;
-            tool_button(
+            if tool_button(
                 ui,
                 rect(base, 80., 36., 36.),
                 Icon::Measure,
                 "Measure",
                 false,
-                false,
-            );
+                true,
+            ) {
+                self.start_modeling("Measure");
+            }
             self.group_label(ui, &p, "INSPECT", base - 12., 75.);
             let base = base + 98.;
             for (dx, k, name) in [
@@ -1323,6 +1368,38 @@ impl FusionApp {
             }
         }
         items.sort_by_key(|i| i.2);
+        items.extend(
+            self.document
+                .features
+                .iter()
+                .map(|f| (f.name.clone(), true, f.id)),
+        );
+        let order = self.document.feature_order().unwrap_or_default();
+        items.sort_by_key(|item| {
+            if item.1 {
+                order
+                    .iter()
+                    .position(|id| *id == item.2)
+                    .map(|i| i * 2 + 1)
+                    .unwrap_or(usize::MAX)
+            } else {
+                order
+                    .iter()
+                    .position(|id| {
+                        self.document
+                            .extrusions
+                            .iter()
+                            .any(|e| e.id == *id && e.sketch_id == item.2)
+                            || self
+                                .document
+                                .features
+                                .iter()
+                                .any(|f| f.id == *id && f.dependencies().contains(&item.2))
+                    })
+                    .map(|i| i * 2)
+                    .unwrap_or(order.len() * 2 + 1)
+            }
+        });
         for (name, solid, id) in items {
             let r = rect(x, h - 38., 25., 28.);
             let response = ui.interact(r, Id::unique(("timeline", id)), Sense::click());
@@ -1338,8 +1415,40 @@ impl FusionApp {
             response
                 .clone()
                 .on_hover_text(format!("{name} — double-click to edit"));
+            response.context_menu(|ui| {
+                if !self.busy {
+                    if solid {
+                        let suppressed = self.document.suppressed.contains(&id);
+                        if ui
+                            .button(if suppressed {
+                                "Unsuppress with Dependents"
+                            } else {
+                                "Suppress with Dependents"
+                            })
+                            .clicked()
+                        {
+                            match self.document.with_suppression(id, !suppressed) {
+                                Ok(d) => self.send(Command::Replace(d)),
+                                Err(e) => self.error = Some(e.to_string()),
+                            }
+                            ui.close();
+                        }
+                    }
+                    if ui.button("Delete with Dependents").clicked() {
+                        match self.document.without_feature(id) {
+                            Ok(d) => self.send(Command::Replace(d)),
+                            Err(e) => self.error = Some(e.to_string()),
+                        }
+                        ui.close();
+                    }
+                }
+            });
             if response.double_clicked() {
                 if solid {
+                    if self.document.features.iter().any(|f| f.id == id) {
+                        self.edit_modeling(id);
+                        continue;
+                    }
                     if let Some(e) = self.document.extrusions.iter().find(|e| e.id == id) {
                         if self.busy {
                             continue;
@@ -2032,12 +2141,25 @@ impl FusionApp {
             "CREATE" => vec![
                 ("Create Sketch", "", true),
                 ("Extrude", "E", true),
-                ("Revolve", "", false),
-                ("Sweep", "", false),
-                ("Loft", "", false),
-                ("Hole", "H", false),
-                ("Pattern", "", false),
+                ("Revolve", "", true),
+                ("Sweep", "", true),
+                ("Loft", "", true),
+                ("Hole", "H", true),
+                ("Rectangular Pattern", "", true),
+                ("Circular Pattern", "", true),
+                ("Mirror", "", true),
             ],
+            "MODIFY" => vec![
+                ("Press Pull", "", true),
+                ("Fillet", "", true),
+                ("Chamfer", "", true),
+                ("Shell", "", true),
+                ("Combine", "", true),
+                ("Split Body", "", true),
+                ("Move / Copy", "", true),
+                ("Change Parameters", "", true),
+            ],
+            "INSPECT" => vec![("Measure", "", true), ("Section Analysis", "", false)],
             "Workspace" => vec![
                 ("Design", "", true),
                 ("Manufacture", "", false),
@@ -2118,6 +2240,22 @@ impl FusionApp {
                 }
                 "Create Sketch" => self.mode = Mode::PlaneChoice,
                 "Extrude" => self.start_extrude(),
+                "Revolve"
+                | "Sweep"
+                | "Loft"
+                | "Hole"
+                | "Fillet"
+                | "Chamfer"
+                | "Shell"
+                | "Press Pull"
+                | "Move / Copy"
+                | "Mirror"
+                | "Rectangular Pattern"
+                | "Circular Pattern"
+                | "Combine"
+                | "Split Body"
+                | "Change Parameters"
+                | "Measure" => self.start_modeling(action),
                 "Line" => self.tool = Tool::Line,
                 "Polygon" => self.tool = Tool::Polyline,
                 "2-Point Rectangle" => self.tool = Tool::Rectangle,
@@ -2203,7 +2341,9 @@ impl FusionApp {
             || self.show_dimension
             || cursor.is_some_and(|p| {
                 p.x < 305.
-                    || ((self.mode == Mode::Sketch || self.extrude.is_some())
+                    || ((self.mode == Mode::Sketch
+                        || self.extrude.is_some()
+                        || self.modeling.is_some())
                         && p.x > r.right() - 258.)
                     || p.y > r.bottom() - 32.
                     || p.x > r.right() - 112. && p.y < 250.
@@ -2238,7 +2378,43 @@ impl FusionApp {
             }
             if let Some(pos) = cursor.filter(|p| r.contains(*p)) {
                 if self.mode == Mode::PlaneChoice {
-                    self.planes(ui, r, &painter, pos, response.clicked());
+                    let face = if response.clicked() {
+                        crate::view::planar_surface(self.camera, r, &self.mesh, pos)
+                    } else {
+                        None
+                    };
+                    if let Some((plane, origin, body_id)) = face {
+                        let axis = match plane {
+                            Plane::XY => fission180_core::features::Axis::Z,
+                            Plane::XZ => fission180_core::features::Axis::Y,
+                            Plane::YZ => fission180_core::features::Axis::X,
+                        };
+                        let index = axis.index();
+                        if let Some(body) = self.committed_bodies.iter().find(|b| b.id == body_id) {
+                            let positive = (body.bounds[1][index] - origin[index]).abs()
+                                < (body.bounds[0][index] - origin[index]).abs();
+                            if (body.bounds[usize::from(positive)][index] - origin[index]).abs()
+                                < 1e-5
+                            {
+                                self.begin_sketch(plane);
+                                if let Some(s) = &mut self.draft {
+                                    s.origin = origin;
+                                    s.support = Some(fission180_core::features::PlanarSupport {
+                                        body_id,
+                                        axis,
+                                        positive,
+                                        offset: 0.,
+                                    });
+                                }
+                            } else {
+                                self.error = Some(
+                                    "Choose a principal planar face at the body boundary".into(),
+                                );
+                            }
+                        }
+                    } else {
+                        self.planes(ui, r, &painter, pos, response.clicked());
+                    }
                 } else if sketch_active {
                     let mut local = self.camera.unproject(pos, r);
                     if self.snap {
@@ -2375,6 +2551,7 @@ impl FusionApp {
                         self.status = match pick {
                             Pick::Face(_) => "Face selected",
                             Pick::Edge(_) => "Edge selected",
+                            Pick::Body(_) => "Body selected",
                         }
                         .into();
                     } else {
@@ -2652,6 +2829,9 @@ impl eframe::App for FusionApp {
                     self.camera = Camera::default();
                     self.selected = None;
                     self.extrude = None;
+                    self.modeling = None;
+                    self.selected_topology = None;
+                    self.hovered_topology = None;
                     self.sketch_history = Default::default();
                 }
             }
@@ -2692,6 +2872,13 @@ impl eframe::App for FusionApp {
                     self.start_extrude();
                 }
             }
+            if !self.busy {
+                if let Some(name) = self.pending_modeling.take() {
+                    if self.error.is_none() {
+                        self.start_modeling(&name);
+                    }
+                }
+            }
         }
         self.shortcuts(ui.ctx());
         let r = ui.max_rect();
@@ -2714,6 +2901,9 @@ impl eframe::App for FusionApp {
             }
             if self.extrude.is_some() {
                 self.extrude_palette(ui, w);
+            }
+            if self.modeling.is_some() {
+                self.modeling_palette(ui, w);
             }
             self.dimension_palette(ui, w);
         }

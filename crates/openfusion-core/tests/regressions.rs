@@ -79,12 +79,14 @@ fn stable_region_dependencies_survive_reorder_and_reject_removal() {
 fn legacy_indices_resolve_before_regions_and_ambiguous_migration_never_writes() {
     let mut d = block(Backend::Occt);
     d.version = 1;
+    // The historical v1 schema had profiles, without an entity graph.
+    d.sketches[0].graph = None;
     d.sketches[0]
         .profiles
         .insert(0, rectangle([60., 0.], [70., 10.]));
     d.extrusions[0].profile = 1;
     let migrated = Document::from_json(&d.to_json().unwrap()).unwrap();
-    assert_eq!(migrated.version, 2);
+    assert_eq!(migrated.version, 3);
     assert_eq!(migrated.extrusions[0].region_id, Some(2));
     assert!((Model::build(&migrated).unwrap().info()[0].volume - 6000.).abs() < 1e-5);
     d.sketches[0].profiles.push(Profile::Circle {
@@ -470,6 +472,7 @@ fn polygon_regions_with_holes_and_large_legacy_loop_are_validated_analytically()
         .collect();
     let mut d = block(Backend::Occt);
     d.version = 1;
+    d.sketches[0].graph = None;
     d.sketches[0].profiles = vec![Profile::Polygon { points }];
     let migrated = Document::from_json(&d.to_json().unwrap()).unwrap();
     assert!(Model::build(&migrated).unwrap().info()[0].volume > 6000.);
