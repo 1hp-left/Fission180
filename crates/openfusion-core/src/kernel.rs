@@ -89,8 +89,10 @@ impl SolidKernel for Backend {
 impl Geometry {
     pub(crate) fn output_cmp(&self, other: &Self) -> std::cmp::Ordering {
         if let (Self::Rust(a), Self::Rust(b)) = (self, other) {
-            if let (Some(a), Some(b)) = (a.output_signature(), b.output_signature()) {
-                return a.cmp(&b);
+            if !a.uses_legacy_output_order() && !b.uses_legacy_output_order() {
+                if let (Some(a), Some(b)) = (a.output_signature(), b.output_signature()) {
+                    return a.cmp(&b);
+                }
             }
         }
         self.bounds()

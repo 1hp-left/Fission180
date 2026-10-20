@@ -285,7 +285,8 @@ pub struct Extrusion {
     pub region_id: Option<u64>,
     #[serde(default)]
     pub distance_expression: Option<String>,
-    /// Explicit output IDs, ordered by bounds, for empty or split Boolean results.
+    /// Materialized Boolean output IDs. Legacy rectangular outputs retain
+    /// bounds ordering; new analytic outputs use source relationship ordering.
     #[serde(default)]
     pub result_body_ids: Vec<u64>,
     /// Accepted complete region boundary selection (outer followed by holes).

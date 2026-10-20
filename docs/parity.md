@@ -43,6 +43,12 @@ These are pending comparison protocols, not completed tests. Link each completed
 
 ## Independent engine phase — 2026-10-20
 
+[Overlapping same-cap blind pockets](overlapping-pockets-2026-10-20.md) use exact
+occupied sections and shared stepped topology, including unequal depths,
+annular pockets and preserved disjoint through-holes. Unsupported opposite-side,
+sidewall and nonparallel interactions fail transactionally. Measurements and
+OCCT agreement are independent implementation evidence, not Fusion parity.
+
 [Analytic planar and same-axis prism Booleans](planar-prisms-2026-10-20.md) adds
 line/arc region operations and uniform-prism Cut/Join/Intersect, including
 sidewall crossings, annular tools and disconnected bodies. Scoped source

@@ -4,6 +4,21 @@ use crate::{
     boundary::PlanarCurve,
     planar::{self, Boolean, RegionSet},
 };
+/// Prove a rectangular silhouette from its actual finite analytic boundary,
+/// including retained collinear source subdivisions after a planar Boolean.
+pub(super) fn rectangular(p: &Profile) -> bool {
+    let b = p.planar_bounds();
+    p.boundary().iter().all(|s| match s.curve {
+        PlanarCurve::Line { start, end } => (0..2).any(|i| {
+            (start[i] - end[i]).abs() <= POLICY.linear_mm
+                && [b[0][i], b[1][i]].iter().any(|v| {
+                    (start[i] - v).abs() <= POLICY.linear_mm
+                        && (end[i] - v).abs() <= POLICY.linear_mm
+                })
+        }),
+        _ => false,
+    })
+}
 pub(super) fn instance(region: &mut planar::Region, feature: u64, index: u64) {
     let source = |mut s: planar::Source| {
         s.occurrences.push((feature, index));
@@ -82,6 +97,12 @@ pub(super) fn boolean(
         _ => return invalid("New Body is not a Boolean operation"),
     };
     let regions = left.boolean(&right, op)?;
+    let aa = a.bounds();
+    let bb = b.bounds();
+    let legacy_disjoint_join = op == Boolean::Union
+        && (0..3).any(|i| {
+            aa[1][i] < bb[0][i] - POLICY.linear_mm || bb[1][i] < aa[0][i] - POLICY.linear_mm
+        });
     let mut solids = vec![];
     let mut region_keys = std::collections::BTreeMap::new();
     for region in regions.regions {
@@ -100,6 +121,16 @@ pub(super) fn boolean(
         input.loop_ids = (1..=input.holes.len() as u64 + 1).collect();
         let mut solid = NativeSolid::extrude(input)?;
         solid.planar = region;
+        // Existing v5 box results persist IDs in bounding-box order. Keep that
+        // contract for rectangular outputs; source keys still guard edits and
+        // identify every edge/face. Newly supported curved outputs use ancestry.
+        solid.legacy_output_order = legacy_disjoint_join
+            || (rectangular(&a.input.outer)
+                && rectangular(&b.input.outer)
+                && a.input.holes.is_empty()
+                && b.input.holes.is_empty()
+                && solid.input.holes.is_empty()
+                && rectangular(&solid.input.outer));
         solid.bind_body(a.body_id);
         solid.name_planar_topology()?;
         solids.push(solid);

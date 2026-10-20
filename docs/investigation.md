@@ -4,6 +4,12 @@ Started: 2026-10-18. Updated: 2026-10-20. Target: Autodesk Fusion, previously ca
 
 ## Current status: installed Fusion and native Rust reconstruction
 
+[Overlapping same-cap blind pockets](overlapping-pockets-2026-10-20.md) adds
+occupied axial sections, exact overlap accounting, stepped floors/walls and
+validated shared topology, with analytic and independent OCCT acceptance. It
+also preserves annular pockets and disjoint through-holes. This is a bounded
+Rust engine extension; no Fusion runtime or UI parity evidence was added.
+
 [Analytic planar and same-axis prism Booleans](planar-prisms-2026-10-20.md)
 adds independent line/arc Union, Difference and Intersection, circles and holes,
 shared/coincident boundaries, disconnected outputs and native extrusion/Combine

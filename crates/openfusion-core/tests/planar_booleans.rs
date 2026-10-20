@@ -236,3 +236,82 @@ fn mixed_boundaries_sidewall_half_disk_and_source_stability() {
     let changed = a.boolean(&b, Boolean::Intersection).unwrap();
     assert_eq!(r.regions[0].key(), changed.regions[0].key());
 }
+
+#[test]
+fn varied_circle_lenses_conserve_area_and_mixed_coincident_arc_intervals() {
+    for ra in [3f64, 7., 10.] {
+        for rb in [2f64, 4., 8.] {
+            for center in [[0.5f64, 1.25], [2.5, -2.25], [6., 3.]] {
+                let d = center[0].hypot(center[1]);
+                let overlap = if d >= ra + rb {
+                    0.
+                } else if d <= (ra - rb).abs() {
+                    PI * ra.min(rb).powi(2)
+                } else {
+                    ra * ra * ((d * d + ra * ra - rb * rb) / (2. * d * ra)).acos()
+                        + rb * rb * ((d * d + rb * rb - ra * ra) / (2. * d * rb)).acos()
+                        - 0.5
+                            * ((-d + ra + rb) * (d + ra - rb) * (d - ra + rb) * (d + ra + rb))
+                                .sqrt()
+                };
+                let a = set(disk(0., ra), vec![], 1);
+                let b = set(Profile::Circle { center, radius: rb }, vec![], 2);
+                for (op, expected) in [
+                    (Boolean::Intersection, overlap),
+                    (Boolean::Union, PI * (ra * ra + rb * rb) - overlap),
+                    (Boolean::Difference, PI * ra * ra - overlap),
+                ] {
+                    close(a.boolean(&b, op).unwrap().area(), expected);
+                    if op != Boolean::Difference {
+                        close(b.boolean(&a, op).unwrap().area(), expected);
+                    }
+                }
+            }
+        }
+    }
+    let arc = |start_angle, sweep| BoundarySegment {
+        source: None,
+        curve: PlanarCurve::Arc {
+            geometry: ArcGeometry {
+                center: [0.; 2],
+                radius: 10.,
+                start_angle,
+                sweep,
+            },
+        },
+    };
+    let line = |start, end| BoundarySegment {
+        source: None,
+        curve: PlanarCurve::Line { start, end },
+    };
+    let a = set(
+        Profile::Curved {
+            segments: vec![arc(0., PI), line([-10., 0.], [10., 0.])],
+        },
+        vec![],
+        1,
+    );
+    let b = set(
+        Profile::Curved {
+            segments: vec![
+                arc(0., PI / 2.),
+                line([0., 10.], [0., 0.]),
+                line([0., 0.], [10., 0.]),
+            ],
+        },
+        vec![],
+        2,
+    );
+    close(
+        a.boolean(&b, Boolean::Intersection).unwrap().area(),
+        25. * PI,
+    );
+    close(a.boolean(&b, Boolean::Union).unwrap().area(), 50. * PI);
+    close(a.boolean(&b, Boolean::Difference).unwrap().area(), 25. * PI);
+    let distant = set(rectangle(100., 1e-6, 20., 10.), vec![], 3);
+    let r = set(rectangle(0., 0., 20., 10.), vec![], 4)
+        .boolean(&distant, Boolean::Union)
+        .unwrap();
+    assert_eq!(r.regions.len(), 2);
+    close(r.area(), 400.);
+}

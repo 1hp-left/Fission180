@@ -329,7 +329,7 @@ fn curved_target_with_existing_hole_and_bound_topology_accepts_disjoint_blind_cu
     assert!(corrupt.validate().is_err());
 }
 #[test]
-fn contained_cut_rejects_enclosed_crossing_touching_and_interacting_voids() {
+fn contained_cut_rejects_enclosed_sidewall_interactions_and_accepts_regular_overlaps() {
     let a = NativeSolid::extrude(block()).unwrap();
     for (profile, start, distance) in [
         (semicircle(), 2., 3.), // enclosed cavity
@@ -372,7 +372,12 @@ fn contained_cut_rejects_enclosed_crossing_touching_and_interacting_voids() {
     let cut = fission180_core::kernel::native::boolean(&a, &tool, Operation::Cut, 5)
         .unwrap()
         .remove(0);
-    assert!(fission180_core::kernel::native::boolean(&cut, &tool, Operation::Cut, 6).is_err());
+    let repeated = fission180_core::kernel::native::boolean(&cut, &tool, Operation::Cut, 6)
+        .unwrap()
+        .remove(0);
+    close(repeated.volume(), cut.volume());
+    close(repeated.area(), cut.area());
+    repeated.topology().validate().unwrap();
     let mut annulus = input(Profile::Circle {
         center: [0.; 2],
         radius: 4.,
@@ -385,15 +390,17 @@ fn contained_cut_rejects_enclosed_crossing_touching_and_interacting_voids() {
     annulus.origin[2] = 7.;
     annulus.distance = 8.;
     annulus.feature_id = 7;
-    assert!(
-        fission180_core::kernel::native::boolean(
-            &a,
-            &NativeSolid::extrude(annulus).unwrap(),
-            Operation::Cut,
-            7
-        )
-        .is_err()
-    );
+    let annular = fission180_core::kernel::native::boolean(
+        &a,
+        &NativeSolid::extrude(annulus).unwrap(),
+        Operation::Cut,
+        7,
+    )
+    .unwrap()
+    .remove(0);
+    close(annular.volume(), 36000. - 36. * PI);
+    close(annular.area(), 9600. + 36. * PI);
+    annular.topology().validate().unwrap();
 }
 fn extrusion(id: u64, sketch: u64, body: u64, distance: f64, operation: Operation) -> Extrusion {
     Extrusion {

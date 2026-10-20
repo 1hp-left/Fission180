@@ -286,7 +286,12 @@ impl RegionSet {
                 }
             }
         }
+        let mut lineage = 0usize;
         for s in self.spans() {
+            lineage += s.ancestry.len() + s.start.len() + s.end.len();
+            if lineage > 32_768 {
+                return invalid("Planar provenance exceeds 32768 records");
+            }
             if s.ancestry.is_empty()
                 || s.ancestry.len() > MAX_CURVES
                 || s.start.is_empty()
@@ -297,6 +302,9 @@ impl RegionSet {
                 return invalid("Planar span has missing/excessive provenance");
             }
             for a in &s.ancestry {
+                if a.source.occurrences.len() > 64 {
+                    return invalid("Planar transform ancestry exceeds 64 instances");
+                }
                 if a.interval
                     .iter()
                     .any(|t| !t.is_finite() || *t < 0. || *t > 1.)
@@ -351,7 +359,25 @@ fn coincident(a: PlanarCurve, b: PlanarCurve) -> Result<bool> {
     Ok(gap <= COINCIDENCE_MM)
 }
 /// Finite intersections plus endpoints of ordinary coincident intervals.
-fn pair_hits(a: PlanarCurve, b: PlanarCurve) -> Result<Vec<(f64, f64)>> {
+pub(crate) fn pair_hits(a: PlanarCurve, b: PlanarCurve) -> Result<Vec<(f64, f64)>> {
+    // Support coincidence matters only for bounded curves that can meet. Avoid
+    // rejecting unrelated, distant spans merely because their infinite lines
+    // (or supporting circles) are nearly coincident/tangent.
+    let bounds = |c: PlanarCurve| {
+        let mut b = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+        for p in c.extrema() {
+            for i in 0..2 {
+                b[0][i] = b[0][i].min(p[i]);
+                b[1][i] = b[1][i].max(p[i]);
+            }
+        }
+        b
+    };
+    let aa = bounds(a);
+    let bb = bounds(b);
+    if (0..2).any(|i| aa[1][i] < bb[0][i] - RESOLUTION_MM || bb[1][i] < aa[0][i] - RESOLUTION_MM) {
+        return Ok(vec![]);
+    }
     if coincident(a, b)? {
         let mut hits = vec![];
         for p in [a.point(0.), a.point(1.), b.point(0.), b.point(1.)] {
@@ -389,7 +415,7 @@ fn pair_hits(a: PlanarCurve, b: PlanarCurve) -> Result<Vec<(f64, f64)>> {
     }
     crate::boundary::intersections(a, b)
 }
-fn crossing(a: &Span, b: &Span, branch: u8) -> BTreeSet<Junction> {
+fn crossing(a: &Span, b: &Span, branch: u8) -> Result<BTreeSet<Junction>> {
     let mut marks = BTreeSet::new();
     for x in &a.ancestry {
         for y in &b.ancestry {
@@ -400,10 +426,13 @@ fn crossing(a: &Span, b: &Span, branch: u8) -> BTreeSet<Junction> {
                     (&y.source, &x.source)
                 };
                 marks.insert(Junction::Intersection(u.clone(), v.clone(), branch));
+                if marks.len() > MAX_CURVES {
+                    return invalid("Analytic junction ancestry exceeds 512 source pairs");
+                }
             }
         }
     }
-    marks
+    Ok(marks)
 }
 fn classification(set: &RegionSet, p: [f64; 2]) -> Result<bool> {
     if set.spans().iter().any(|s| s.curve.parameter(p).is_some()) {
@@ -434,7 +463,7 @@ pub fn boolean(a: &RegionSet, b: &RegionSet, op: Boolean) -> Result<RegionSet> {
                 if events > MAX_EVENTS {
                     return invalid("Planar Boolean exceeds 32768 intersection events");
                 }
-                let marks = crossing(sources[i], sources[j], branch as u8);
+                let marks = crossing(sources[i], sources[j], branch as u8)?;
                 cuts[i].push((t, marks.clone()));
                 cuts[j].push((u, marks));
             }
@@ -478,7 +507,7 @@ pub fn boolean(a: &RegionSet, b: &RegionSet, op: Boolean) -> Result<RegionSet> {
         let mut sides = [None, None];
         sides[operand] = Some((true, false));
         for j in i + 1..pieces.len() {
-            if used[j] || !coincident(span.curve, pieces[j].1.curve)? {
+            if used[j] {
                 continue;
             }
             let s = &pieces[j].1;
@@ -489,6 +518,9 @@ pub fn boolean(a: &RegionSet, b: &RegionSet, op: Boolean) -> Result<RegionSet> {
             if !(forward || backward)
                 || distance(span.curve.point(0.5), s.curve.point(0.5)) > COINCIDENCE_MM
             {
+                continue;
+            }
+            if !coincident(span.curve, s.curve)? {
                 continue;
             }
             if sides[pieces[j].0].is_some() {
@@ -639,4 +671,62 @@ pub fn identity(key: &impl Serialize) -> Result<u64> {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     Ok(hash)
+}
+
+/// Refine several analytic sections to a common set of planar junctions. This
+/// changes segmentation only, retaining each section's area and ancestry.
+pub(crate) fn refine_sections(regions: &mut [Region]) -> Result<()> {
+    let sources: Vec<Span> = regions
+        .iter()
+        .flat_map(Region::loops)
+        .flat_map(|l| l.spans.clone())
+        .collect();
+    if sources.len() > 2048 {
+        return invalid("Stepped section refinement exceeds 2048 curves");
+    }
+    let mut events = 0;
+    let mut span_count = 0;
+    for region in regions {
+        for l in std::iter::once(&mut region.outer).chain(&mut region.holes) {
+            let mut result = vec![];
+            for s in &l.spans {
+                let mut cuts = vec![(0., s.start.clone()), (1., s.end.clone())];
+                for other in &sources {
+                    for (branch, (t, _)) in pair_hits(s.curve, other.curve)?.into_iter().enumerate()
+                    {
+                        events += 1;
+                        if events > 262_144 {
+                            return invalid("Stepped section refinement exceeds 262144 events");
+                        }
+                        cuts.push((t, crossing(s, other, branch as u8)?));
+                    }
+                }
+                cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut merged: Vec<(f64, BTreeSet<Junction>)> = vec![];
+                for (t, key) in cuts {
+                    if let Some(last) = merged
+                        .last_mut()
+                        .filter(|(u, _)| (t - u).abs() * s.curve.length() <= COINCIDENCE_MM)
+                    {
+                        last.1.extend(key);
+                    } else {
+                        merged.push((t, key));
+                    }
+                }
+                for w in merged.windows(2) {
+                    if (w[1].0 - w[0].0) * s.curve.length() < RESOLUTION_MM {
+                        return invalid("Stepped section creates a sub-resolution span");
+                    }
+                    result.push(s.portion(w[0].0, w[1].0, w[0].1.clone(), w[1].1.clone()));
+                    span_count += 1;
+                    if span_count > MAX_SPANS {
+                        return invalid("Stepped refinement exceeds 8192 spans");
+                    }
+                }
+            }
+            l.spans = result;
+            l.profile().validate()?;
+        }
+    }
+    Ok(())
 }

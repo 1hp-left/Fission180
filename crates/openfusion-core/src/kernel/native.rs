@@ -5,6 +5,7 @@ use crate::{DisplayMesh, EPS, Operation, Plane, Profile, Result, invalid};
 use serde::{Deserialize, Serialize};
 mod cuts;
 mod prisms;
+mod steps;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Tolerance {
@@ -419,6 +420,8 @@ pub struct NativeSolid {
     pockets: Vec<cuts::Pocket>,
     planar: crate::planar::Region,
     planar_named: bool,
+    legacy_output_order: bool,
+    stepped: Option<steps::Stepped>,
     pub provenance: Vec<Provenance>,
 }
 fn measure(profile: &Profile) -> (f64, f64) {
@@ -446,24 +449,28 @@ impl NativeSolid {
         }
         input.feature_id = feature;
         let mut result = Self::extrude(input)?;
+        result.planar = self.planar.clone();
+        prisms::instance(&mut result.planar, feature, instance);
         for pocket in &self.pockets {
             let mut pocket = pocket.clone();
             for (v, o) in pocket.input.origin.iter_mut().zip(offset) {
                 *v += o;
             }
-            result.append_pocket(pocket)?;
+            prisms::instance(&mut pocket.region, feature, instance);
+            if self.stepped.is_some() {
+                result.pockets.push(pocket);
+            } else {
+                result.append_pocket(pocket)?;
+            }
+        }
+        if self.stepped.is_some() {
+            result.rebuild_steps(feature)?;
         }
         result.provenance = self.provenance.clone();
-        let axes = match self.input.plane {
-            Plane::XY => [0, 1],
-            Plane::XZ => [0, 2],
-            Plane::YZ => [1, 2],
-        };
-        result.planar = prisms::shifted(&self.planar, axes.map(|i| offset[i]));
-        prisms::instance(&mut result.planar, feature, instance);
         if self.planar_named {
             result.name_planar_topology()?;
         }
+        result.legacy_output_order = self.legacy_output_order;
         result.provenance.push(Provenance {
             feature,
             operation: Operation::NewBody,
@@ -477,8 +484,22 @@ impl NativeSolid {
     pub fn planar_region(&self) -> &crate::planar::Region {
         &self.planar
     }
+    /// Exact occupied sections for stepped solids; axial coordinates are signed
+    /// millimetres along the principal plane normal in world coordinates.
+    pub fn occupied_sections(&self) -> Option<Vec<([f64; 2], &crate::planar::RegionSet)>> {
+        self.stepped.as_ref().map(|steps| {
+            steps
+                .slabs
+                .iter()
+                .map(|s| (s.interval, &s.occupied))
+                .collect()
+        })
+    }
     pub fn output_signature(&self) -> Option<Vec<Vec<crate::planar::SpanKey>>> {
         self.planar_named.then(|| self.planar.key())
+    }
+    pub(crate) fn uses_legacy_output_order(&self) -> bool {
+        self.legacy_output_order
     }
     fn last_feature(&self) -> u64 {
         self.provenance
@@ -770,6 +791,8 @@ impl NativeSolid {
             pockets: vec![],
             planar,
             planar_named: false,
+            legacy_output_order: false,
+            stepped: None,
             provenance: vec![Provenance {
                 feature,
                 operation: Operation::NewBody,
@@ -778,6 +801,9 @@ impl NativeSolid {
         })
     }
     pub fn volume(&self) -> f64 {
+        if let Some(steps) = &self.stepped {
+            return steps.volume;
+        }
         (measure(&self.input.outer).0 - self.input.holes.iter().map(|p| measure(p).0).sum::<f64>())
             * self.input.distance.abs()
             - self
@@ -787,6 +813,9 @@ impl NativeSolid {
                 .sum::<f64>()
     }
     pub fn area(&self) -> f64 {
+        if let Some(steps) = &self.stepped {
+            return steps.area;
+        }
         let (a, p) = measure(&self.input.outer);
         let holes_area: f64 = self.input.holes.iter().map(|p| measure(p).0).sum();
         let holes_perimeter: f64 = self.input.holes.iter().map(|p| measure(p).1).sum();
@@ -820,7 +849,9 @@ impl NativeSolid {
         bounds
     }
     pub fn mesh(&self, segments: usize) -> Result<DisplayMesh> {
-        if self.pockets.is_empty() {
+        if let Some(steps) = &self.stepped {
+            steps.mesh(&self.topology, segments)
+        } else if self.pockets.is_empty() {
             self.mesh_prism(segments)
         } else {
             self.mesh_pockets(segments)
@@ -1054,7 +1085,9 @@ pub fn boolean(
             _ => return invalid("New Body is not a Boolean operation"),
         }
     } else if operation == Operation::Cut {
-        if let Some(solids) = cuts::contained_cut(a, b, feature)? {
+        if let Some(solids) = steps::cut(a, b, feature)? {
+            solids
+        } else if let Some(solids) = cuts::contained_cut(a, b, feature)? {
             solids
         } else {
             box_boolean(a, b, operation, feature)?
@@ -1088,11 +1121,11 @@ fn box_boolean(
     operation: Operation,
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
-    if !matches!(a.input.outer, Profile::Rectangle { .. })
+    if !prisms::rectangular(&a.input.outer)
         || !a.pockets.is_empty()
         || !b.pockets.is_empty()
         || !a.input.holes.is_empty()
-        || !matches!(b.input.outer, Profile::Rectangle { .. })
+        || !prisms::rectangular(&b.input.outer)
         || !b.input.holes.is_empty()
     {
         return invalid(

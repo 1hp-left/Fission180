@@ -56,8 +56,10 @@ Every span retains its original feature, region, boundary, entity (where present
 original primitive edge ordinal, transform instance path and directed source
 parameter interval. Reversal reverses ancestry intervals; coincident retained
 spans carry both ancestries. Endpoint and intersection relationship keys survive
-assembly. Body ordering and Boolean edge/face identities derive from these
-relationships, without sampled coordinates or result-array positions. Digest
+assembly. New analytic body ordering and Boolean edge/face identities derive from
+these relationships, without sampled coordinates or result-array positions. The
+subsequent pocket batch preserves historical v5 rectangular-output and disjoint Join bounds order
+and guards those bodies with source keys during accepted edits. Digest
 collisions fail explicitly. This remains scoped source-based naming; arbitrary
 topology edits and general persistent naming are not solved.
 

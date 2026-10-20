@@ -270,3 +270,137 @@ fn tangent_solid_contacts_empty_intersection_and_pocket_safety() {
     exhausted.loop_ids = vec![u64::MAX];
     assert!(NativeSolid::extrude(exhausted).is_err());
 }
+
+#[test]
+fn translation_keeps_local_analytic_coordinates_for_subsequent_booleans() {
+    let original = NativeSolid::extrude(input(disk(0., 10.), vec![], 2)).unwrap();
+    let moved = original.translated([30., 7., 0.], 5).unwrap();
+    let mut tool = input(disk(0., 10.), vec![], 8);
+    tool.origin = [40., 7., 0.];
+    let r = native::boolean(
+        &moved,
+        &NativeSolid::extrude(tool).unwrap(),
+        Operation::Intersect,
+        9,
+    )
+    .unwrap();
+    close(
+        r[0].volume(),
+        5. * (200. * std::f64::consts::PI / 3. - 50. * 3f64.sqrt()),
+    );
+    assert!(r[0].bounds()[0][0] >= 30.);
+    r[0].topology().validate().unwrap();
+}
+
+#[test]
+fn planar_radius_expression_replays_boolean_with_stable_sources() {
+    let a = input(disk(0., 10.), vec![], 2);
+    let b = input(disk(10., 10.), vec![], 5);
+    let mut d = document(&a, &b, Operation::Intersect, Backend::Rust, false);
+    d.parameters.insert("radius".into(), "10 mm".into());
+    for s in &mut d.sketches {
+        let entity = *s
+            .graph
+            .as_ref()
+            .unwrap()
+            .entities
+            .iter()
+            .find(|(_, e)| matches!(e, fission180_core::sketch::Entity::Circle { .. }))
+            .unwrap()
+            .0;
+        *s = s
+            .with_entity_dimension(entity, "radius".into(), &d.parameters)
+            .unwrap();
+    }
+    let mut session = Session::new(d).unwrap();
+    let old = if let Geometry::Rust(s) = &session.model.bodies[0].solid {
+        s.output_signature()
+    } else {
+        panic!()
+    };
+    session
+        .replace(
+            session
+                .document
+                .with_parameter("radius".into(), "12 mm".into())
+                .unwrap(),
+        )
+        .unwrap();
+    let expected = 2. * 144. * (10f64 / 24.).acos() - 5. * (4. * 144. - 100f64).sqrt();
+    close(session.model.info()[0].volume, expected * 5.);
+    let new = if let Geometry::Rust(s) = &session.model.bodies[0].solid {
+        s.output_signature()
+    } else {
+        panic!()
+    };
+    assert_eq!(old, new);
+    let reopened =
+        Session::new(Document::from_json(&session.document.to_json().unwrap()).unwrap()).unwrap();
+    close(reopened.model.info()[0].volume, expected * 5.);
+}
+
+#[test]
+fn v5_box_split_ids_keep_historical_bounds_order_and_subsequent_box_operations() {
+    let a = input(
+        fission180_core::Profile::Rectangle {
+            a: [40., 20.],
+            b: [0., 0.],
+        },
+        vec![],
+        2,
+    );
+    let b = input(rect(19., -5., 2., 30.), vec![], 5);
+    let mut d = document(&a, &b, Operation::Cut, Backend::Rust, false);
+    d.extrusions[1].result_body_ids = vec![3, 6];
+    let saved = d.to_json().unwrap();
+    let session = Session::new(Document::from_json(&saved).unwrap()).unwrap();
+    let left = &session
+        .model
+        .bodies
+        .iter()
+        .find(|b| b.id == 3)
+        .unwrap()
+        .solid;
+    let right = &session
+        .model
+        .bodies
+        .iter()
+        .find(|b| b.id == 6)
+        .unwrap()
+        .solid;
+    close(left.bounds()[0][0], 0.);
+    close(left.bounds()[1][0], 19.);
+    close(right.bounds()[0][0], 21.);
+    // A later slab does not share the original occupied interval. The legacy
+    // analytic box path must still recognize the retained rectangular prism.
+    let mut slab = input(rect(-5., -5., 50., 30.), vec![], 9);
+    slab.origin[2] = 2.;
+    slab.distance = 1.;
+    let cut = Backend::Rust
+        .boolean(
+            left,
+            &Backend::Rust.extrude(&slab).unwrap(),
+            Operation::Cut,
+            9,
+        )
+        .unwrap();
+    assert_eq!(cut.len(), 2);
+    close(cut.iter().map(Geometry::volume).sum(), 1520.);
+
+    // Disjoint mixed-profile Join was also supported before region Booleans.
+    // Its persisted first ID belongs to the left body, even when that is the tool.
+    let a = input(disk(40., 5.), vec![], 2);
+    let b = input(rect(-10., -10., 20., 20.), vec![], 5);
+    let mut d = document(&a, &b, Operation::Join, Backend::Rust, false);
+    d.extrusions[1].result_body_ids = vec![3, 6];
+    let reopened = Session::new(Document::from_json(&d.to_json().unwrap()).unwrap()).unwrap();
+    let left = &reopened
+        .model
+        .bodies
+        .iter()
+        .find(|b| b.id == 3)
+        .unwrap()
+        .solid;
+    close(left.bounds()[0][0], -10.);
+    close(left.volume(), 2000.);
+}

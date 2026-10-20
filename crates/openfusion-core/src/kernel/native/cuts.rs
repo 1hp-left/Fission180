@@ -8,6 +8,7 @@ pub(super) struct Pocket {
     /// Removed prism from floor to opening; its parametric end cap is the opening.
     pub input: ExtrudeInput,
     pub opening_cap: usize,
+    pub region: crate::planar::Region,
 }
 pub(super) fn interval(input: &ExtrudeInput) -> [f64; 2] {
     let start = dot(input.origin, input.plane.normal().to_array());
@@ -68,7 +69,7 @@ pub(super) fn reframe(target: &ExtrudeInput, tool: &ExtrudeInput) -> Option<Extr
     }
     Some(input)
 }
-fn disjoint(a: &Profile, b: &Profile) -> bool {
+pub(super) fn disjoint(a: &Profile, b: &Profile) -> bool {
     !a.contains_point(b.boundary()[0].curve.point(0.))
         && !b.contains_point(a.boundary()[0].curve.point(0.))
         && a.boundary().iter().all(|x| {
@@ -86,6 +87,12 @@ pub(super) fn pockets_equal(a: &NativeSolid, b: &NativeSolid) -> bool {
                 && a.input
                     .outer
                     .geometrically_equal(&b.input.outer, POLICY.linear_mm)
+                && a.input.holes.len() == b.input.holes.len()
+                && a.input
+                    .holes
+                    .iter()
+                    .zip(&b.input.holes)
+                    .all(|(a, b)| a.geometrically_equal(b, POLICY.linear_mm))
         })
 }
 pub(super) fn contained_cut(
@@ -99,6 +106,15 @@ pub(super) fn contained_cut(
     let Some(tool) = reframe(&a.input, &b.input) else {
         return Ok(None);
     };
+    let axes = match a.input.plane {
+        Plane::XY => [0, 1],
+        Plane::XZ => [0, 2],
+        Plane::YZ => [1, 2],
+    };
+    let tool_region = super::prisms::shifted(
+        &b.planar,
+        axes.map(|i| b.input.origin[i] - a.input.origin[i]),
+    );
     let target = interval(&a.input);
     let cutter = interval(&tool);
     let lo = target[0].max(cutter[0]);
@@ -134,7 +150,17 @@ pub(super) fn contained_cut(
         input.feature_id = feature;
         input.holes.push(tool.outer);
         input.loop_ids.push(next_loop(&input.loop_ids)?);
-        return Ok(Some(vec![a.rebuilt(input)?]));
+        let mut result = a.rebuilt(input)?;
+        result.planar = a.planar.clone();
+        let mut hole = tool_region.outer;
+        hole.spans = hole
+            .spans
+            .iter()
+            .rev()
+            .map(crate::planar::Span::reversed)
+            .collect();
+        result.planar.holes.push(hole);
+        return Ok(Some(vec![result]));
     }
     let enters_low = cutter[0] <= target[0] + POLICY.linear_mm;
     let enters_high = cutter[1] >= target[1] - POLICY.linear_mm;
@@ -157,7 +183,12 @@ pub(super) fn contained_cut(
     input.origin = std::array::from_fn(|i| a.input.origin[i] + normal[i] * (floor - start));
     let opening_cap = usize::from((opening - start).abs() > POLICY.linear_mm);
     let mut result = a.clone();
-    result.append_pocket(Pocket { input, opening_cap })?;
+    let region = tool_region;
+    result.append_pocket(Pocket {
+        input,
+        opening_cap,
+        region,
+    })?;
     Ok(Some(vec![result]))
 }
 fn next_loop(ids: &[u64]) -> Result<u64> {
@@ -249,7 +280,7 @@ impl NativeSolid {
         Ok(mesh)
     }
 }
-fn append_mesh(
+pub(super) fn append_mesh(
     mesh: &mut DisplayMesh,
     part: DisplayMesh,
     include: impl Fn(TopologyId) -> bool,
