@@ -43,4 +43,4 @@ These are pending comparison protocols, not completed tests. Link each completed
 
 ## Independent engine phase — 2026-10-20
 
-[Exact curved regions and extrusion](curved-engine-2026-10-20.md) records the Rust implementation and its analytic/interoperability acceptance. No fresh Fusion runtime or UI comparison was attempted. General curved Booleans and kernel replacement remain incomplete; the default backend is still OCCT.
+[Exact curved regions and extrusion](curved-engine-2026-10-20.md) records the Rust implementation and its analytic/interoperability acceptance. No fresh Fusion runtime or UI comparison was attempted. [Contained blind curved cuts](contained-curved-cuts-2026-10-20.md) now execute on Rust with validated topology, replay and disjoint-void restrictions. General curved Booleans and kernel replacement remain incomplete; the default backend is still OCCT.

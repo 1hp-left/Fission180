@@ -3,6 +3,7 @@
 use super::ExtrudeInput;
 use crate::{DisplayMesh, EPS, Operation, Plane, Profile, Result, invalid};
 use serde::{Deserialize, Serialize};
+mod cuts;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Tolerance {
@@ -320,6 +321,35 @@ impl Brep {
                         );
                     }
                 }
+                if let Surface::Cylinder { origin, axis, .. } = face.surface {
+                    // Signed UV area: -integral(v du). Generators have du=0;
+                    // circular trims have constant axial v and exact signed du.
+                    let mut area = 0.;
+                    for co in boundary {
+                        let (center, normal, sweep) = match self.edges[co.edge].curve {
+                            Curve::Line => continue,
+                            Curve::Circle { center, normal, .. } => {
+                                (center, normal, std::f64::consts::TAU)
+                            }
+                            Curve::Arc {
+                                center,
+                                normal,
+                                sweep,
+                                ..
+                            } => (center, normal, sweep),
+                        };
+                        let height = dot(std::array::from_fn(|i| center[i] - origin[i]), axis);
+                        area -=
+                            height * sweep * dot(normal, axis) * if co.reversed { -1. } else { 1. };
+                    }
+                    let sign = if face.reversed { -1. } else { 1. }
+                        * if loop_index == 0 { 1. } else { -1. };
+                    if area * sign <= 0. {
+                        return invalid(
+                            "Rust cylindrical trim orientation disagrees with face orientation",
+                        );
+                    }
+                }
             }
         }
         if uses.iter().any(|u| *u != (1, 1)) {
@@ -385,6 +415,7 @@ pub struct NativeSolid {
     input: ExtrudeInput,
     body_id: u64,
     topology: Brep,
+    pockets: Vec<cuts::Pocket>,
     pub provenance: Vec<Provenance>,
 }
 fn measure(profile: &Profile) -> (f64, f64) {
@@ -404,16 +435,28 @@ impl NativeSolid {
         }
         input.feature_id = feature;
         let mut result = Self::extrude(input)?;
+        for pocket in &self.pockets {
+            let mut pocket = pocket.clone();
+            for (v, o) in pocket.input.origin.iter_mut().zip(offset) {
+                *v += o;
+            }
+            result.append_pocket(pocket)?;
+        }
         result.provenance = self.provenance.clone();
         result.provenance.push(Provenance {
             feature,
             operation: Operation::NewBody,
-            parents: vec![self.input.feature_id],
+            parents: vec![self.last_feature()],
         });
         Ok(result)
     }
     pub fn topology(&self) -> &Brep {
         &self.topology
+    }
+    fn last_feature(&self) -> u64 {
+        self.provenance
+            .last()
+            .map_or(self.input.feature_id, |p| p.feature)
     }
     pub fn bind_body(&mut self, id: u64) {
         self.body_id = id;
@@ -464,6 +507,15 @@ impl NativeSolid {
             let v = input.plane.point(p, input.origin).to_array();
             std::array::from_fn(|i| v[i] + if top { normal[i] * input.distance } else { 0. })
         };
+        for profile in std::iter::once(&input.outer).chain(input.holes.iter()) {
+            for p in profile.boundary().iter().flat_map(|s| s.curve.extrema()) {
+                for top in [false, true] {
+                    for n in world(p, top) {
+                        crate::number(n)?;
+                    }
+                }
+            }
+        }
         let key = |local| TopologyId {
             body: 0,
             feature: input.feature_id,
@@ -531,6 +583,7 @@ impl NativeSolid {
                 .unwrap_or(loop_index as u64 + 1);
             let local_base = loop_id
                 .checked_mul(10_000)
+                .and_then(|base| base.checked_add(5000).map(|_| base))
                 .ok_or_else(|| crate::Error::Invalid("Topology ID space exhausted".into()))?;
             for top in [false, true] {
                 for i in 0..n {
@@ -677,6 +730,7 @@ impl NativeSolid {
             input,
             body_id: 0,
             topology: brep,
+            pockets: vec![],
             provenance: vec![Provenance {
                 feature,
                 operation: Operation::NewBody,
@@ -687,12 +741,23 @@ impl NativeSolid {
     pub fn volume(&self) -> f64 {
         (measure(&self.input.outer).0 - self.input.holes.iter().map(|p| measure(p).0).sum::<f64>())
             * self.input.distance.abs()
+            - self
+                .pockets
+                .iter()
+                .map(|p| p.input.outer.signed_area().abs() * p.input.distance.abs())
+                .sum::<f64>()
     }
     pub fn area(&self) -> f64 {
         let (a, p) = measure(&self.input.outer);
         let holes_area: f64 = self.input.holes.iter().map(|p| measure(p).0).sum();
         let holes_perimeter: f64 = self.input.holes.iter().map(|p| measure(p).1).sum();
-        2. * (a - holes_area) + (p + holes_perimeter) * self.input.distance.abs()
+        2. * (a - holes_area)
+            + (p + holes_perimeter) * self.input.distance.abs()
+            + self
+                .pockets
+                .iter()
+                .map(|p| p.input.outer.perimeter() * p.input.distance.abs())
+                .sum::<f64>()
     }
     pub fn bounds(&self) -> [[f64; 3]; 2] {
         let bounds2 = self.input.outer.planar_bounds();
@@ -716,6 +781,13 @@ impl NativeSolid {
         bounds
     }
     pub fn mesh(&self, segments: usize) -> Result<DisplayMesh> {
+        if self.pockets.is_empty() {
+            self.mesh_prism(segments)
+        } else {
+            self.mesh_pockets(segments)
+        }
+    }
+    fn mesh_prism(&self, segments: usize) -> Result<DisplayMesh> {
         if !(8..=4096).contains(&segments) {
             return invalid("Rust display tessellation requires 8..4096 segments");
         }
@@ -861,7 +933,7 @@ impl NativeSolid {
                 if corners[li][i] {
                     mesh.edges.extend([a, d]);
                     mesh.edge_ids.push(TopologyId {
-                        local: local + 3000 + i as u64,
+                        local: local + 3000 + ordinal,
                         ..face
                     });
                 }
@@ -916,6 +988,7 @@ pub fn boolean(
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
     let same = a.input.plane == b.input.plane
+        && cuts::pockets_equal(a, b)
         && a.input.origin == b.input.origin
         && (a.input.distance - b.input.distance).abs() < POLICY.linear_mm
         && a.input
@@ -944,61 +1017,34 @@ pub fn boolean(
             Operation::Join => vec![a.clone(), b.clone()],
             _ => return invalid("New Body is not a Boolean operation"),
         }
-    } else if operation == Operation::Cut
-        && through_covers(&a.input, &b.input)
-        && b.input.holes.is_empty()
-    {
-        let mut input = a.input.clone();
-        input.feature_id = feature;
-        input.holes.push(b.input.outer.clone());
-        input.loop_ids.push(
-            input
-                .loop_ids
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or_else(|| crate::Error::Invalid("Topology identity space exhausted".into()))?,
-        );
-        // Only a strictly contained, through-all analytic hole is accepted here.
-        match NativeSolid::extrude(input) {
-            Ok(s) => vec![s],
-            Err(_) => box_boolean(a, b, operation, feature)?,
+    } else if operation == Operation::Cut {
+        if let Some(solids) = cuts::contained_cut(a, b, feature)? {
+            solids
+        } else {
+            box_boolean(a, b, operation, feature)?
         }
     } else {
         box_boolean(a, b, operation, feature)?
     };
-    for s in &mut result {
-        if s.provenance.last().is_none_or(|p| p.feature != feature) {
-            s.provenance.push(Provenance {
-                feature,
-                operation,
-                parents: vec![a.input.feature_id, b.input.feature_id],
-            });
+    let mut history = a.provenance.clone();
+    for p in &b.provenance {
+        if p.feature != feature && !history.iter().any(|q| q.feature == p.feature) {
+            history.push(p.clone());
         }
     }
+    let mut parents = vec![a.last_feature(), b.last_feature()];
+    parents.retain(|p| *p != feature);
+    parents.sort_unstable();
+    parents.dedup();
+    for s in &mut result {
+        s.provenance = history.clone();
+        s.provenance.push(Provenance {
+            feature,
+            operation,
+            parents: parents.clone(),
+        });
+    }
     Ok(result)
-}
-fn through_covers(target: &ExtrudeInput, tool: &ExtrudeInput) -> bool {
-    if target.plane != tool.plane {
-        return false;
-    }
-    let normal = target.plane.normal().to_array();
-    let axis = (0..3)
-        .max_by(|a, b| normal[*a].abs().total_cmp(&normal[*b].abs()))
-        .unwrap();
-    if (0..3).any(|i| i != axis && (target.origin[i] - tool.origin[i]).abs() > POLICY.linear_mm) {
-        return false;
-    }
-    let interval = |input: &ExtrudeInput| {
-        let first = input.origin[axis] * normal[axis];
-        let last = first + input.distance;
-        [first.min(last), first.max(last)]
-    };
-    let a = interval(target);
-    let b = interval(tool);
-    b[0] <= a[0] + POLICY.linear_mm && b[1] >= a[1] - POLICY.linear_mm
 }
 fn box_boolean(
     a: &NativeSolid,
@@ -1007,6 +1053,8 @@ fn box_boolean(
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
     if !matches!(a.input.outer, Profile::Rectangle { .. })
+        || !a.pockets.is_empty()
+        || !b.pockets.is_empty()
         || !a.input.holes.is_empty()
         || !matches!(b.input.outer, Profile::Rectangle { .. })
         || !b.input.holes.is_empty()

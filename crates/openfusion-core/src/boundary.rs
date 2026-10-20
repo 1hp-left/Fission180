@@ -160,6 +160,8 @@ impl PlanarCurve {
 /// Finite analytic intersections; overlapping supports with positive shared length
 /// are rejected rather than assigned an arbitrary arrangement ordering.
 pub fn intersections(a: PlanarCurve, b: PlanarCurve) -> Result<Vec<(f64, f64)>> {
+    a.validate()?;
+    b.validate()?;
     let mut points = vec![];
     match (a, b) {
         (PlanarCurve::Line { start: p, end: q }, PlanarCurve::Line { start: r, end: s }) => {
@@ -308,6 +310,16 @@ impl Profile {
     }
     /// Winding on y-monotone analytic spans, using half-open endpoint ownership.
     pub fn contains_point(&self, p: [f64; 2]) -> bool {
+        // Boundary contact is distinct from strict containment. Use the same
+        // metric tolerance at connected endpoints: sin(PI) is not exactly zero,
+        // and unequal endpoint ownership must not leave an unmatched crossing.
+        if self
+            .boundary()
+            .iter()
+            .any(|s| s.curve.parameter(p).is_some())
+        {
+            return false;
+        }
         let mut winding = 0;
         for span in self.boundary() {
             let mut cuts = vec![0., 1.];
@@ -327,7 +339,7 @@ impl Profile {
                 let curve = span.curve.portion(pair[0], pair[1]);
                 let a = curve.point(0.);
                 let b = curve.point(1.);
-                if (a[1] > p[1]) == (b[1] > p[1]) {
+                if (a[1] - p[1] > EPS) == (b[1] - p[1] > EPS) {
                     continue;
                 }
                 let x = match curve {

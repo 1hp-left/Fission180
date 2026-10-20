@@ -376,6 +376,22 @@ fn line_arc_cells_branches_nested_loops_and_stable_region_keys() {
     let regions = split.regions().unwrap();
     assert_eq!(regions.len(), 2);
     assert!(split.region(id).is_err());
+    let mut consumer = Session::new(document(split.clone())).unwrap();
+    let divider = *split
+        .graph
+        .as_ref()
+        .unwrap()
+        .entities
+        .keys()
+        .last()
+        .unwrap();
+    let mut merged = consumer.document.clone();
+    merged.sketches[0] = split
+        .with_construction(&[divider], true, &Default::default())
+        .unwrap();
+    let before = consumer.document.clone();
+    assert!(consumer.replace(merged).is_err());
+    assert_eq!(consumer.document, before);
     for r in &regions {
         let s = NativeSolid::extrude(input(split.profile_by_id(r.outer).unwrap().clone(), vec![]))
             .unwrap();
@@ -431,6 +447,9 @@ fn arc_arc_intersections_find_lens_and_retire_split_consumers() {
 }
 #[test]
 fn corrupt_topology_and_degenerate_boundaries_are_rejected() {
+    let mut exhausted = input(semicircle(10.), vec![]);
+    exhausted.loop_ids = vec![u64::MAX / 10_000];
+    assert!(NativeSolid::extrude(exhausted).is_err());
     let s = NativeSolid::extrude(input(semicircle(10.), vec![])).unwrap();
     let mut corrupt = s.topology().clone();
     if let Curve::Arc { sweep, .. } = &mut corrupt.edges[0].curve {

@@ -258,6 +258,7 @@ fn rust_boolean_unsupported_is_explicit_without_occt_geometry() {
         vec![],
     );
     tool.distance = 3.;
+    tool.origin[2] = 1.; // A fully enclosed cavity remains outside the supported cut scope.
     let b = Backend::Rust.extrude(&tool).unwrap();
     assert!(
         Backend::Rust

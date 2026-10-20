@@ -88,26 +88,22 @@ impl Profile {
             let a = self.boundary();
             let b = other.boundary();
             return a.len() == b.len()
-                && a.iter().zip(b).all(|(a, b)| {
-                    a.source == b.source
-                        && match (a.curve, b.curve) {
-                            (
-                                boundary::PlanarCurve::Line { .. },
-                                boundary::PlanarCurve::Line { .. },
-                            ) => [0., 1.].iter().all(|t| {
-                                boundary::distance(a.curve.point(*t), b.curve.point(*t)) < tolerance
-                            }),
-                            (
-                                boundary::PlanarCurve::Arc { geometry: x },
-                                boundary::PlanarCurve::Arc { geometry: y },
-                            ) => {
-                                boundary::distance(x.center, y.center) < tolerance
-                                    && (x.radius - y.radius).abs() < tolerance
-                                    && (x.sweep - y.sweep).abs() * x.radius < tolerance
-                                    && boundary::distance(x.point(0.), y.point(0.)) < tolerance
-                            }
-                            _ => false,
-                        }
+                && a.iter().zip(b).all(|(a, b)| match (a.curve, b.curve) {
+                    (boundary::PlanarCurve::Line { .. }, boundary::PlanarCurve::Line { .. }) => {
+                        [0., 1.].iter().all(|t| {
+                            boundary::distance(a.curve.point(*t), b.curve.point(*t)) < tolerance
+                        })
+                    }
+                    (
+                        boundary::PlanarCurve::Arc { geometry: x },
+                        boundary::PlanarCurve::Arc { geometry: y },
+                    ) => {
+                        boundary::distance(x.center, y.center) < tolerance
+                            && (x.radius - y.radius).abs() < tolerance
+                            && (x.sweep - y.sweep).abs() * x.radius < tolerance
+                            && boundary::distance(x.point(0.), y.point(0.)) < tolerance
+                    }
+                    _ => false,
                 });
         }
         match (self, other) {
@@ -543,6 +539,15 @@ impl Document {
                     graph.validate_solution(&self.parameters)?;
                     for (id, p) in s.profile_ids.iter().zip(&s.profiles) {
                         let derived = graph.profile(*id, p)?;
+                        if let (Profile::Curved { segments: a }, Profile::Curved { segments: b }) =
+                            (p, &derived)
+                        {
+                            if a.iter().map(|s| s.source).ne(b.iter().map(|s| s.source)) {
+                                return invalid(
+                                    "Curved boundary source cache differs from its entity dependencies",
+                                );
+                            }
+                        }
                         if !p.geometrically_equal(&derived, EPS) {
                             return invalid(
                                 "Sketch geometry cache differs from solved entities; recompute dependencies first",
