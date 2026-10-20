@@ -5,13 +5,14 @@ use std::{collections::HashSet, io::Cursor, path::Path};
 
 pub const EPS: f64 = 1e-5;
 pub mod expression;
+pub mod extrusion;
 pub mod features;
 pub mod kernel;
 pub mod persistence;
 pub mod region;
 pub mod sketch;
 mod sketch_edit;
-use kernel::{Backend, ExtrudeInput, Geometry, SolidKernel};
+use kernel::{Backend, Geometry, SolidKernel};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
@@ -218,6 +219,8 @@ pub struct Extrusion {
     /// Explicit output IDs, ordered by bounds, for empty or split Boolean results.
     #[serde(default)]
     pub result_body_ids: Vec<u64>,
+    #[serde(default)]
+    pub options: extrusion::ExtrudeOptions,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -450,6 +453,7 @@ impl Document {
             if e.distance.abs() < EPS {
                 return invalid("Extrusion distance must be nonzero");
             }
+            e.options.validate(self, e.distance, e.operation)?;
             let s = self
                 .sketches
                 .iter()
@@ -504,7 +508,7 @@ impl Document {
                 || self
                     .extrusions
                     .iter()
-                    .any(|e| e.distance_expression.is_some())
+                    .any(|e| e.distance_expression.is_some() || e.options != Default::default())
             {
                 return invalid(
                     "Legacy v1 cannot encode these feature/parameter/backend extensions",
@@ -651,23 +655,7 @@ impl Model {
                 .ok_or_else(|| Error::Invalid("Missing timeline extrusion".into()))?;
             let e = document.extrusions[feature_index].clone();
             let s = document.resolved_sketch(e.sketch_id, &bodies)?;
-            let region = s.region(e.region_id.unwrap())?;
-            let tool = document.backend.extrude(&ExtrudeInput {
-                feature_id: e.id,
-                region_id: region.id,
-                loop_ids: std::iter::once(region.outer)
-                    .chain(region.inner.iter().copied())
-                    .collect(),
-                outer: s.profile_by_id(region.outer)?.clone(),
-                holes: region
-                    .inner
-                    .iter()
-                    .map(|id| s.profile_by_id(*id).cloned())
-                    .collect::<Result<_>>()?,
-                plane: s.plane,
-                origin: s.origin,
-                distance: e.distance,
-            })?;
+            let tool = e.tool(&document, &s, &bodies)?;
             let index = bodies.iter().position(|b| b.id == e.body_id);
             let mut solids = match e.operation {
                 Operation::NewBody => {
@@ -993,6 +981,7 @@ mod tests {
                 region_id: Some(1),
                 distance_expression: None,
                 result_body_ids: vec![],
+                options: Default::default(),
             }],
             ..Default::default()
         }
@@ -1036,6 +1025,7 @@ mod tests {
                 region_id: Some(1),
                 distance_expression: None,
                 result_body_ids: vec![],
+                options: Default::default(),
             });
             let expected = match operation {
                 Operation::Cut => 6000. - 125. * std::f64::consts::PI,

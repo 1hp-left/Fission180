@@ -763,9 +763,7 @@ pub fn boolean(
             _ => return invalid("New Body is not a Boolean operation"),
         }
     } else if operation == Operation::Cut
-        && a.input.plane == b.input.plane
-        && a.input.origin == b.input.origin
-        && (a.input.distance - b.input.distance).abs() < POLICY.linear_mm
+        && through_covers(&a.input, &b.input)
         && b.input.holes.is_empty()
     {
         let mut input = a.input.clone();
@@ -799,6 +797,26 @@ pub fn boolean(
         }
     }
     Ok(result)
+}
+fn through_covers(target: &ExtrudeInput, tool: &ExtrudeInput) -> bool {
+    if target.plane != tool.plane {
+        return false;
+    }
+    let normal = target.plane.normal().to_array();
+    let axis = (0..3)
+        .max_by(|a, b| normal[*a].abs().total_cmp(&normal[*b].abs()))
+        .unwrap();
+    if (0..3).any(|i| i != axis && (target.origin[i] - tool.origin[i]).abs() > POLICY.linear_mm) {
+        return false;
+    }
+    let interval = |input: &ExtrudeInput| {
+        let first = input.origin[axis] * normal[axis];
+        let last = first + input.distance;
+        [first.min(last), first.max(last)]
+    };
+    let a = interval(target);
+    let b = interval(tool);
+    b[0] <= a[0] + POLICY.linear_mm && b[1] >= a[1] - POLICY.linear_mm
 }
 fn box_boolean(
     a: &NativeSolid,

@@ -13,6 +13,8 @@ use fission180_core::{
 use std::path::PathBuf;
 #[path = "commands.rs"]
 mod commands;
+#[path = "extrude.rs"]
+mod extrude;
 #[path = "sketch_edit.rs"]
 mod sketch_edit;
 
@@ -139,6 +141,7 @@ struct ExtrudeDialog {
     body_id: u64,
     last_preview: String,
     input: fission180_core::expression::DraftInput,
+    options: fission180_core::extrusion::ExtrudeOptions,
 }
 
 #[derive(Default)]
@@ -370,6 +373,7 @@ impl FusionApp {
                 region_id: Some(1),
                 distance_expression: None,
                 result_body_ids: vec![],
+                options: Default::default(),
             });
             app.send(Command::Replace(d));
         }
@@ -482,6 +486,7 @@ impl FusionApp {
             }
         };
         self.extrude = Some(ExtrudeDialog {
+            options: Default::default(),
             editing: None,
             sketch_id,
             profile,
@@ -506,6 +511,7 @@ impl FusionApp {
         }
         let mut d = self.document.clone();
         let feature = Extrusion {
+            options: dialog.options.clone(),
             id: dialog.editing.or_else(|| d.next_id().ok())?,
             name: format!("Extrude{}", d.extrusions.len() + 1),
             sketch_id: dialog.sketch_id,
@@ -1493,39 +1499,7 @@ impl FusionApp {
                         self.edit_modeling(id);
                         continue;
                     }
-                    if let Some(e) = self.document.extrusions.iter().find(|e| e.id == id) {
-                        if self.busy {
-                            continue;
-                        }
-                        let distance = e
-                            .distance_expression
-                            .clone()
-                            .unwrap_or_else(|| e.distance.to_string());
-                        if let Some(profile) = self
-                            .document
-                            .sketches
-                            .iter()
-                            .find(|s| s.id == e.sketch_id)
-                            .and_then(|s| {
-                                s.profile_ids.iter().position(|id| Some(*id) == e.region_id)
-                            })
-                        {
-                            self.selected = Some((e.sketch_id, profile));
-                            self.extrude = Some(ExtrudeDialog {
-                                editing: Some(e.id),
-                                sketch_id: e.sketch_id,
-                                profile,
-                                distance: distance.clone(),
-                                operation: e.operation,
-                                body_id: e.body_id,
-                                last_preview: String::new(),
-                                input: fission180_core::expression::DraftInput::new(
-                                    distance,
-                                    &self.document.parameters,
-                                ),
-                            });
-                        }
-                    }
+                    self.edit_extrusion(id);
                 } else if let Some(s) = self.document.sketches.iter().find(|s| s.id == id) {
                     if self.busy {
                         continue;
@@ -1857,202 +1831,6 @@ impl FusionApp {
             "Finish Sketch",
         ) {
             self.finish_sketch();
-        }
-    }
-    fn extrude_palette(&mut self, ui: &mut egui::Ui, w: f32) {
-        let Some(mut dialog) = self.extrude.take() else {
-            return;
-        };
-        let p = ui.painter().clone();
-        let x = w - 254.;
-        let y = 258.;
-        p.rect(
-            rect(
-                x,
-                y,
-                250.,
-                if dialog.operation == Operation::NewBody {
-                    314.
-                } else {
-                    344.
-                },
-            ),
-            0.,
-            PANEL,
-            Stroke::new(1., BORDER),
-            egui::StrokeKind::Inside,
-        );
-        label(&p, pos2(x + 12., y + 12.), "−  EXTRUDE", 12., TEXT);
-        label(&p, pos2(w - 17., y + 12.), "»", 12., MUTED);
-        p.line_segment(
-            [pos2(x, y + 25.), pos2(w - 4., y + 25.)],
-            Stroke::new(1., BORDER),
-        );
-        for (i, name) in [
-            "Type",
-            "Profiles",
-            "Start",
-            "Direction",
-            "Extent Type",
-            "Distance",
-            "Taper Angle",
-        ]
-        .iter()
-        .enumerate()
-        {
-            label(
-                &p,
-                pos2(x + 12., y + 40. + i as f32 * 30.),
-                *name,
-                12.,
-                TEXT,
-            );
-        }
-        tool_button(
-            ui,
-            rect(x + 92., y + 27., 27., 25.),
-            Icon::Extrude,
-            "Solid",
-            true,
-            true,
-        );
-        tool_button(
-            ui,
-            rect(x + 123., y + 27., 25., 25.),
-            Icon::Shell,
-            "Thin Extrude",
-            false,
-            false,
-        );
-        button(
-            ui,
-            rect(x + 93., y + 57., 85., 27.),
-            "profiles",
-            "↖ 1 selected",
-        );
-        for (i, text) in ["Profile Plane  ⌄", "One Side       ⌄", "Distance       ⌄"]
-            .iter()
-            .enumerate()
-        {
-            let r = rect(x + 93., y + 87. + i as f32 * 30., 125., 27.);
-            p.rect_filled(r, 0., C::from_rgb(43, 54, 69));
-            centered(&p, r, *text, 12., TEXT);
-        }
-        let distance_response = ui.put(
-            rect(x + 93., y + 177., 125., 27.),
-            egui::TextEdit::singleline(&mut dialog.distance)
-                .font(FontId::proportional(12.))
-                .margin(vec2(5., 5.)),
-        );
-        dialog
-            .input
-            .update(dialog.distance.clone(), &self.document.parameters);
-        match &dialog.input.state {
-            fission180_core::expression::InputState::Incomplete => {
-                distance_response
-                    .on_hover_text("Incomplete expression; last valid preview retained");
-            }
-            fission180_core::expression::InputState::Error(e) => {
-                distance_response.on_hover_text(e);
-            }
-            fission180_core::expression::InputState::Valid(v) => {
-                distance_response.on_hover_text(format!("{} mm", v.millimetres));
-            }
-        }
-        let taper = rect(x + 93., y + 207., 125., 27.);
-        p.rect_filled(taper, 0., C::from_rgb(43, 54, 69));
-        label(&p, taper.left_center() + vec2(5., 0.), "0.0 deg", 12., TEXT);
-        p.line_segment(
-            [pos2(x + 10., y + 242.), pos2(w - 15., y + 242.)],
-            Stroke::new(0.7, BORDER),
-        );
-        label(&p, pos2(x + 12., y + 260.), "Operation", 12., TEXT);
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(rect(x + 93., y + 247., 125., 27.)),
-            |ui| {
-                egui::ComboBox::from_id_salt("operation")
-                    .selected_text(dialog.operation.label())
-                    .width(118.)
-                    .show_ui(ui, |ui| {
-                        for operation in [
-                            Operation::NewBody,
-                            Operation::Join,
-                            Operation::Cut,
-                            Operation::Intersect,
-                        ] {
-                            if ui
-                                .selectable_value(
-                                    &mut dialog.operation,
-                                    operation,
-                                    operation.label(),
-                                )
-                                .changed()
-                            {
-                                dialog.body_id = if operation == Operation::NewBody {
-                                    self.document
-                                        .next_id()
-                                        .ok()
-                                        .and_then(|id| id.checked_add(1))
-                                        .unwrap_or(0)
-                                } else {
-                                    self.committed_bodies.first().map(|b| b.id).unwrap_or(0)
-                                };
-                            }
-                        }
-                    });
-            },
-        );
-        let footer = if dialog.operation == Operation::NewBody {
-            282.
-        } else {
-            312.
-        };
-        if dialog.operation != Operation::NewBody {
-            label(&p, pos2(x + 12., y + 290.), "Target Body", 12., TEXT);
-            ui.scope_builder(
-                egui::UiBuilder::new().max_rect(rect(x + 93., y + 277., 125., 27.)),
-                |ui| {
-                    egui::ComboBox::from_id_salt("target-body")
-                        .selected_text(format!("Body{}", dialog.body_id))
-                        .show_ui(ui, |ui| {
-                            // Use committed body IDs, not transient preview outputs.
-                            for b in &self.committed_bodies {
-                                ui.selectable_value(&mut dialog.body_id, b.id, &b.name);
-                            }
-                        });
-                },
-            );
-        }
-        let ok = button(ui, rect(x + 115., y + footer, 45., 24.), "extrude-ok", "OK");
-        let cancel = button(
-            ui,
-            rect(x + 172., y + footer, 64., 24.),
-            "extrude-cancel",
-            "Cancel",
-        );
-        let signature = format!(
-            "{}:{:?}:{}",
-            dialog.distance, dialog.operation, dialog.body_id
-        );
-        let changed = signature != dialog.last_preview;
-        dialog.last_preview = signature;
-        self.extrude = Some(dialog);
-        if cancel {
-            self.extrude = None;
-            self.send(Command::ResetPreview);
-        } else if ok {
-            if let Some(d) = self.extrusion_document() {
-                self.send(Command::Replace(d));
-                self.extrude = None;
-                self.selected = None;
-                self.dirty = true;
-            } else {
-                self.error = Some("Enter a nonzero extrusion distance".into());
-            }
-        } else if changed {
-            if let Some(d) = self.extrusion_document() {
-                self.send(Command::Preview(d));
-            }
         }
     }
     fn dimension_palette(&mut self, ui: &mut egui::Ui, w: f32) {

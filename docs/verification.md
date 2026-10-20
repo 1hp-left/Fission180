@@ -1,5 +1,9 @@
 # Native desktop verification
 
+## Current implementation — 2026-10-19
+
+The latest source passes fmt/check and **47 workspace tests**, with new independently checked sketch editing, command replay, persistence, topology and extrusion extents. [Integrity/kernel repairs](development-2026-10-19.md), [solid commands](features-2026-10-19.md), [entity editing](sketch-editing-2026-10-19.md), and [extent evidence](extrusion-extents-2026-10-19.md) record exact scope, backend execution, saved/reopened fixtures and inspected native screenshots. Full parity remains unachieved. The seven-test rename baseline below is historical.
+
 ## Fission 180 rename — 2026-10-19
 
 The active Rust app, Cargo packages, executable, window title, Home text, file-dialog labels, and initial badges now use Fission 180 / `fission180`. Source paths, historical audit evidence, and existing version-1 `.ofrust` documents retain their original names/format for compatibility. `FISSION180_TIMINGS` is the current timing switch; `OPENFUSION_TIMINGS` remains an alias.

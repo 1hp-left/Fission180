@@ -30,6 +30,7 @@ fn main() {
         region_id: Some(1),
         distance_expression: None,
         result_body_ids: vec![],
+        options: Default::default(),
     });
     doc.sketches.push(Sketch {
         id: 4,
@@ -59,6 +60,7 @@ fn main() {
         region_id: Some(1),
         distance_expression: None,
         result_body_ids: vec![],
+        options: Default::default(),
     });
     let expected = 6000. - 125. * std::f64::consts::PI;
     let mut timings = vec![];

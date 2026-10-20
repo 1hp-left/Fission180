@@ -33,6 +33,7 @@ fn extrusion(
         operation,
         body_id,
         result_body_ids: vec![],
+        options: Default::default(),
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,7 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut records = vec![];
     for backend in [Backend::Occt, Backend::Rust] {
-        for scenario in ["rectangle", "annular-region", "split-cut", "parameter-edit"] {
+        for scenario in [
+            "rectangle",
+            "annular-region",
+            "split-cut",
+            "parameter-edit",
+            "offset-symmetric",
+            "two-sided",
+            "through-all",
+        ] {
             let mut d = Document {
                 name: format!("{scenario}-{}", backend.label()),
                 backend,
@@ -59,6 +68,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .push(extrusion(2, 1, 1, 3, 6., Operation::NewBody));
             d.extrusions[0].distance_expression = Some("2 * 3 mm".into());
             match scenario {
+                "offset-symmetric" | "two-sided" => {
+                    d.extrusions[0].distance = if scenario == "two-sided" { 4. } else { 10. };
+                    d.parameters.insert("offset".into(), "3 mm".into());
+                    d.extrusions[0].distance_expression = Some(
+                        if scenario == "two-sided" {
+                            "4 mm"
+                        } else {
+                            "10 mm"
+                        }
+                        .into(),
+                    );
+                    d.extrusions[0].options = fission180_core::extrusion::ExtrudeOptions {
+                        offset_start: true,
+                        start_offset: "offset".into(),
+                        direction: if scenario == "two-sided" {
+                            fission180_core::extrusion::Direction::TwoSides
+                        } else {
+                            fission180_core::extrusion::Direction::Symmetric
+                        },
+                        second_distance: "6 mm".into(),
+                        ..Default::default()
+                    };
+                }
+                "through-all" => {
+                    let mut circle = sketch(
+                        4,
+                        vec![Profile::Circle {
+                            center: [20., 15.],
+                            radius: 5.,
+                        }],
+                    );
+                    circle.origin[2] = -3.;
+                    d.sketches.push(circle);
+                    let mut cut = extrusion(5, 4, 1, 3, 1., Operation::Cut);
+                    cut.options.extent = fission180_core::extrusion::Extent::ThroughAll;
+                    d.extrusions.push(cut);
+                }
                 "annular-region" => {
                     d.sketches[0].add_profile(Profile::Circle {
                         center: [20., 15.],

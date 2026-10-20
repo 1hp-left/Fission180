@@ -8,6 +8,8 @@ Started: 2026-10-18. Updated: 2026-10-19. Target: Autodesk Fusion, previously ca
 
 [Entity editing batch](sketch-editing-2026-10-19.md) connects graph selection, constraint creation/removal, line/circle dimensions, constrained point dragging, construction state, simple closed line regions and sketch rollback display. These are independently implemented application behaviors. Matched Fusion constraint glyphs, interaction states and solving behavior remain unverified.
 
+[Extrusion extent implementation](extrusion-extents-2026-10-19.md) replaces static start/direction/extent rows with functional controls, retains expression text, checks all principal planes on both backends and extends Rust's contained through-cut support. No Fusion taper, thin extrusion or To Object equivalence is claimed.
+
 [Implemented integrity, sketch and kernel slice](development-2026-10-19.md) records the transactional worker/save fixes, version-1 migration/version-2 saves, sketch graph and command history, expressions/parameters, regions and split outputs, and explicit OCCT/Rust backends. Fresh clean Fusion Home/sketch/reference frames were recovered. Desktop automation was then stopped with physical Escape; matched solid and Fission UI retests remain incomplete.
 
 The independent application was renamed **Fission 180** (formerly OpenFusion) on 2026-10-19. This branding change does not resolve the audit findings or establish parity. Active Cargo packages use `fission180-*` and the executable is `fission180.exe`. Historical observations, audit records, source directories, external evidence paths, and the `.ofrust` format identifier retain their original names for traceability and compatibility.

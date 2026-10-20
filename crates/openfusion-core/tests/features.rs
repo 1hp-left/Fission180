@@ -29,6 +29,7 @@ fn block(backend: Backend) -> Document {
             operation: Operation::NewBody,
             body_id: 3,
             result_body_ids: vec![],
+            options: Default::default(),
         }],
         ..Default::default()
     }
@@ -327,6 +328,7 @@ fn face_supported_sketch_tracks_upstream_height_and_timeline_order() {
             operation: Operation::NewBody,
             body_id: 12,
             result_body_ids: vec![],
+            options: Default::default(),
         });
         let mut s = check_reopen(d);
         assert_eq!(s.document.timeline, vec![2, 4, 11]);

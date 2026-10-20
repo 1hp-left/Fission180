@@ -36,6 +36,8 @@ Build requirements: Rust 1.95 or newer and a Windows MSVC C++ toolchain. The fir
 
 In a sketch, click endpoints/centers, edges or constraint glyphs to select them; Ctrl/Shift adds selection. The Constraints menu and ribbon apply geometric relations. D dimensions a selected line or circle, X toggles construction, and Delete removes the selected geometry or constraint. Closed line chains create profiles. Drag points to solve their constraints; Escape cancels the drag.
 
+Extrude supports profile/offset starts, One Side, Two Sides and Symmetric directions, and Distance or All extents with an explicit target body. Symmetric distance is the whole length. All recomputes against the target on upstream changes; taper, thin extrusion and To Object remain unsupported.
+
 Geometry work and meshing run on a dedicated worker thread. A failed geometry edit retains the last valid committed model. Display meshes and projected triangles are cached; the event-driven window does not continuously redraw while idle. Dimensions are millimetres.
 
 Double-click a sketch in the Browser or timeline to edit it. The next geometry commit replays dependent solid commands. Sketch Undo/Redo reverses complete accepted edits, including dimension expressions and constraints. Double-click a solid timeline item to edit/replay it; its context menu suppresses or deletes it with its dependents. Create Sketch also accepts principal planar body faces. Change Parameters edits persisted named length expressions.

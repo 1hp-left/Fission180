@@ -170,6 +170,16 @@ impl FusionApp {
         if self.busy {
             return;
         }
+        if name == "Extrude" {
+            self.start_extrude();
+            return;
+        }
+        if name == "Edit Extrude" {
+            if let Some(id) = self.document.extrusions.last().map(|e| e.id) {
+                self.edit_extrusion(id);
+            }
+            return;
+        }
         if self.mode == Mode::Sketch && !matches!(name, "Change Parameters" | "Measure") {
             self.pending_modeling = Some(name.to_string());
             self.finish_sketch();

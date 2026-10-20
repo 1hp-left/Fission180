@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 operation: Operation::NewBody,
                 body_id: 3,
                 result_body_ids: vec![],
+                options: Default::default(),
             }],
             ..Default::default()
         };

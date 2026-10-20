@@ -38,6 +38,7 @@ fn extrusion(
         operation,
         body_id,
         result_body_ids: vec![],
+        options: Default::default(),
     }
 }
 fn block(backend: Backend) -> Document {
