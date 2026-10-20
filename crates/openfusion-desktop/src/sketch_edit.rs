@@ -1,5 +1,36 @@
 use super::*;
+use fission180_core::arc::ArcGeometry;
 use fission180_core::sketch::{Constraint, Entity, SketchGraph};
+#[derive(Default)]
+pub(super) struct ArcDraft {
+    pub endpoints: Vec<[f64; 2]>,
+    pub preview: Option<ArcGeometry>,
+}
+impl ArcDraft {
+    pub fn hover(&mut self, point: [f64; 2]) -> Option<ArcGeometry> {
+        if self.endpoints.len() == 2 {
+            if let Ok(arc) = ArcGeometry::through(self.endpoints[0], point, self.endpoints[1]) {
+                self.preview = Some(arc);
+            }
+        }
+        self.preview
+    }
+}
+fn arc_path(arc: ArcGeometry, camera: Camera, sketch: &Sketch, r: Rect) -> Vec<Pos2> {
+    let angle = 2.
+        * (1. - 0.35 / (arc.radius * camera.scale as f64).max(0.35))
+            .clamp(-1., 1.)
+            .acos();
+    let segments = (arc.sweep.abs() / angle.max(0.01)).ceil().clamp(4., 512.) as usize;
+    arc.sample(segments)
+        .iter()
+        .map(|p| {
+            camera
+                .project(sketch.plane.point(*p, sketch.origin).to_array(), r)
+                .0
+        })
+        .collect()
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SketchPick {
     Point(u64),
@@ -17,6 +48,7 @@ fn item_position(graph: &SketchGraph, item: SketchPick) -> Option<[f64; 2]> {
             Entity::Circle { center, radius } => {
                 Some([graph.points[center][0] + radius, graph.points[center][1]])
             }
+            Entity::Arc { .. } => graph.arc_geometry(id).ok().map(|arc| arc.point(0.5)),
         },
         SketchPick::Constraint(id) => {
             let c = graph.constraints.get(&id)?;
@@ -74,7 +106,7 @@ pub(super) fn snap_point(
     let mut candidates = vec![([0., 0.], "Origin")];
     if let Some(g) = &sketch.graph {
         candidates.extend(g.points.values().map(|p| (*p, "Endpoint / Center")));
-        for e in g.entities.values() {
+        for (id, e) in &g.entities {
             if let Entity::Line { a, b } = e {
                 candidates.push((
                     [
@@ -83,6 +115,11 @@ pub(super) fn snap_point(
                     ],
                     "Midpoint",
                 ));
+            }
+            if matches!(e, Entity::Arc { .. }) {
+                if let Ok(arc) = g.arc_geometry(*id) {
+                    candidates.push((arc.point(0.5), "Arc midpoint"));
+                }
             }
         }
     }
@@ -120,6 +157,100 @@ pub(super) fn snap_point(
     (p, kind)
 }
 impl FusionApp {
+    pub(super) fn start_arc(&mut self) {
+        self.tool = Tool::Arc;
+        self.anchor = None;
+        self.polyline.clear();
+        self.arc_draft = Default::default();
+        self.sketch_selection.clear();
+        self.status = "3-Point Arc: place first end point".into();
+    }
+    pub(super) fn place_arc_point(&mut self, point: [f64; 2]) {
+        if self.arc_draft.endpoints.len() < 2 {
+            if self
+                .arc_draft
+                .endpoints
+                .first()
+                .is_some_and(|p| (p[0] - point[0]).hypot(p[1] - point[1]) < fission180_core::EPS)
+            {
+                self.error = Some("Arc end points must be distinct".into());
+                return;
+            }
+            self.arc_draft.endpoints.push(point);
+            self.error = None;
+        } else if let Some(s) = &self.draft {
+            let result = s.with_three_point_arc(
+                self.arc_draft.endpoints[0],
+                point,
+                self.arc_draft.endpoints[1],
+                &self.document.parameters,
+            );
+            let success = result.is_ok();
+            self.accept_sketch(result);
+            if success {
+                self.arc_draft = Default::default();
+            }
+        }
+    }
+    pub(super) fn paint_arc_draft(&mut self, p: &Painter, local: [f64; 2], r: Rect) {
+        let Some(s) = &self.draft else {
+            return;
+        };
+        if self.arc_draft.endpoints.len() == 1 {
+            let points = [self.arc_draft.endpoints[0], local].map(|v| {
+                self.camera
+                    .project(s.plane.point(v, s.origin).to_array(), r)
+                    .0
+            });
+            p.extend(Shape::dashed_line(&points, Stroke::new(1., ACCENT), 6., 4.));
+        }
+        if let Some(arc) = self.arc_draft.hover(local) {
+            p.add(Shape::line(
+                arc_path(arc, self.camera, s, r),
+                Stroke::new(1.7, ACCENT),
+            ));
+            let at = self
+                .camera
+                .project(s.plane.point(arc.point(0.5), s.origin).to_array(), r)
+                .0;
+            label(
+                p,
+                at + vec2(10., -15.),
+                format!("R {:.2} mm", arc.radius),
+                12.,
+                TEXT,
+            );
+        }
+    }
+    pub(super) fn paint_arcs(&self, p: &Painter, r: Rect, sketch: &Sketch) {
+        let Some(g) = &sketch.graph else {
+            return;
+        };
+        for (id, e) in &g.entities {
+            if !matches!(e, Entity::Arc { .. }) {
+                continue;
+            }
+            if let Ok(arc) = g.arc_geometry(*id) {
+                let path = arc_path(arc, self.camera, sketch, r);
+                if g.construction.contains(id) {
+                    p.extend(Shape::dashed_line(&path, Stroke::new(1.3, ACCENT), 6., 4.));
+                } else {
+                    p.add(Shape::line(path, Stroke::new(1.3, ACCENT)));
+                }
+                if self.show_points {
+                    for at in [arc.center, arc.point(0.), arc.point(1.)] {
+                        p.circle_filled(
+                            self.camera
+                                .project(sketch.plane.point(at, sketch.origin).to_array(), r)
+                                .0,
+                            2.,
+                            TEXT,
+                        );
+                    }
+                }
+            }
+        }
+    }
     pub(super) fn start_line_edit(&mut self, extend: bool) {
         self.tool = if extend { Tool::Extend } else { Tool::Trim };
         self.anchor = None;
@@ -348,6 +479,13 @@ impl FusionApp {
                             .length()
                             - (*radius as f32 * self.camera.scale))
                             .abs(),
+                        Entity::Arc { .. } => {
+                            g.arc_geometry(*id)
+                                .ok()?
+                                .distance_to(self.sketch_local(at, r))
+                                as f32
+                                * self.camera.scale
+                        }
                     };
                     (distance < 6.).then_some((distance, SketchPick::Entity(*id)))
                 })
@@ -410,6 +548,14 @@ impl FusionApp {
                             *radius as f32 * self.camera.scale,
                             Stroke::new(2.5, ACCENT),
                         );
+                    }
+                    Some(Entity::Arc { .. }) => {
+                        if let Ok(arc) = g.arc_geometry(*id) {
+                            p.add(Shape::line(
+                                arc_path(arc, self.camera, s, r),
+                                Stroke::new(2.5, ACCENT),
+                            ));
+                        }
                     }
                     _ => {}
                 },
@@ -564,6 +710,9 @@ impl FusionApp {
                                     points.push(*center);
                                     circles.push((*id, *radius));
                                 }
+                                Some(Entity::Arc {
+                                    center, start, end, ..
+                                }) => points.extend([*center, *start, *end]),
                                 _ => {}
                             },
                             _ => {}
@@ -668,6 +817,9 @@ impl FusionApp {
                         entities.extend(g.entities.iter().filter_map(|(id, e)| match e {
                             Entity::Line { a, b } if a == p || b == p => Some(*id),
                             Entity::Circle { center, .. } if center == p => Some(*id),
+                            Entity::Arc {
+                                center, start, end, ..
+                            } if center == p || start == p || end == p => Some(*id),
                             _ => None,
                         }))
                     }
@@ -712,6 +864,10 @@ impl FusionApp {
                 .hypot(g.points[a][1] - g.points[b][1])
                 .to_string(),
             Some(Entity::Circle { radius, .. }) => radius.to_string(),
+            Some(Entity::Arc { .. }) => match g.arc_geometry(id) {
+                Ok(arc) => arc.radius.to_string(),
+                Err(_) => return false,
+            },
             _ => return false,
         };
         if let Some(c) = g
@@ -755,7 +911,7 @@ impl FusionApp {
             .as_ref()
             .and_then(|s| s.graph.as_ref())
             .and_then(|g| g.entities.get(&id))
-            .is_some_and(|e| matches!(e, Entity::Circle { .. }));
+            .is_some_and(|e| matches!(e, Entity::Circle { .. } | Entity::Arc { .. }));
         label(
             &p,
             r.min + vec2(12., 55.),
@@ -821,5 +977,21 @@ mod tests {
         assert_eq!(point, [35., 10.25]);
         assert_eq!(kind, Some("Horizontal"));
         assert_eq!(snap_point(&s, [35., 50.], 4., None).0, [35., 50.]);
+    }
+    #[test]
+    fn invalid_arc_cursor_retains_last_valid_preview_and_snaps_to_true_midpoint() {
+        let mut draft = ArcDraft {
+            endpoints: vec![[-10., 0.], [10., 0.]],
+            preview: None,
+        };
+        let valid = draft.hover([0., 10.]).unwrap();
+        assert_eq!(draft.hover([0., 0.]), Some(valid));
+        assert_eq!(draft.endpoints, vec![[-10., 0.], [10., 0.]]);
+        let s = Sketch::default()
+            .with_three_point_arc([-10., 0.], [0., 10.], [10., 0.], &Default::default())
+            .unwrap();
+        let snapped = snap_point(&s, [0.2, 10.2], 4., None);
+        assert_eq!(snapped.1, Some("Arc midpoint"));
+        assert!(snapped.0[0].abs() < 1e-6 && (snapped.0[1] - 10.).abs() < 1e-6);
     }
 }

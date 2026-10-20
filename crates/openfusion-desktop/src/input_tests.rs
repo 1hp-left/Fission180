@@ -118,3 +118,42 @@ fn trim_and_extend_undo_redo_restore_entities_dependencies_and_region_registry()
     history.redo(&mut draft);
     assert_eq!(draft, extended);
 }
+
+#[test]
+fn arc_creation_radius_and_construction_undo_redo_preserve_complete_graph() {
+    let original = Sketch::default();
+    let mut history = SketchHistory::default();
+    history.record(&original);
+    let mut draft = original
+        .with_three_point_arc([-10., 0.], [0., 10.], [10., 0.], &Default::default())
+        .unwrap();
+    let created = draft.clone();
+    let arc = *draft
+        .graph
+        .as_ref()
+        .unwrap()
+        .entities
+        .keys()
+        .next()
+        .unwrap();
+    history.record(&draft);
+    draft = draft
+        .with_entity_dimension(arc, "20 mm".into(), &Default::default())
+        .unwrap();
+    let dimensioned = draft.clone();
+    history.record(&draft);
+    draft = draft
+        .with_construction(&[arc], true, &Default::default())
+        .unwrap();
+    let constructed = draft.clone();
+    history.undo(&mut draft);
+    assert_eq!(draft, dimensioned);
+    history.undo(&mut draft);
+    assert_eq!(draft, created);
+    history.undo(&mut draft);
+    assert_eq!(draft, original);
+    history.redo(&mut draft);
+    history.redo(&mut draft);
+    history.redo(&mut draft);
+    assert_eq!(draft, constructed);
+}

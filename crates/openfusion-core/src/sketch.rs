@@ -10,8 +10,20 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Entity {
-    Line { a: u64, b: u64 },
-    Circle { center: u64, radius: f64 },
+    Line {
+        a: u64,
+        b: u64,
+    },
+    Circle {
+        center: u64,
+        radius: f64,
+    },
+    Arc {
+        center: u64,
+        start: u64,
+        end: u64,
+        clockwise: bool,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -121,6 +133,7 @@ impl SketchGraph {
         if self.residuals(parameters)?.iter().any(|r| r.abs() > 1e-6) {
             return invalid("Persisted sketch constraints are unsatisfied");
         }
+        self.validate_curve_relations()?;
         Ok(())
     }
     pub fn validate(&self) -> Result<()> {
@@ -150,6 +163,19 @@ impl SketchGraph {
                 Entity::Circle { center, radius } => {
                     if !self.points.contains_key(center) || !radius.is_finite() || *radius <= EPS {
                         return invalid("Circle has invalid geometry dependencies");
+                    }
+                }
+                Entity::Arc {
+                    center, start, end, ..
+                } => {
+                    if center == start
+                        || center == end
+                        || start == end
+                        || [center, start, end]
+                            .iter()
+                            .any(|id| !self.points.contains_key(id))
+                    {
+                        return invalid("Arc has missing or repeated point dependencies");
                     }
                 }
             }
@@ -488,6 +514,7 @@ impl SketchGraph {
                 crate::number(*n)?;
             }
         }
+        candidate.validate_curve_relations()?;
         let jac = candidate.jacobian(parameters, &x, &apply)?;
         let rank = matrix_rank(jac, 1e-7);
         let report = SolveReport {
@@ -537,6 +564,15 @@ impl SketchGraph {
             Some(Entity::Circle { center, radius }) if *radius > 0. && radius.is_finite() => {
                 Ok((point(*center)?, *radius))
             }
+            Some(Entity::Arc { center, start, .. }) => {
+                let c = point(*center)?;
+                let a = point(*start)?;
+                let radius = (c[0] - a[0]).hypot(c[1] - a[1]);
+                if radius < EPS {
+                    return invalid("Degenerate arc radius");
+                }
+                Ok((c, radius))
+            }
             _ => invalid("Constraint references missing or invalid circle"),
         };
         let delta = |id: u64| -> Result<[f64; 2]> {
@@ -548,6 +584,17 @@ impl SketchGraph {
             Ok(d[0].hypot(d[1]))
         };
         let mut residual = vec![];
+        for e in self.entities.values() {
+            if let Entity::Arc {
+                center, start, end, ..
+            } = e
+            {
+                let c = point(*center)?;
+                let a = point(*start)?;
+                let b = point(*end)?;
+                residual.push((a[0] - c[0]).hypot(a[1] - c[1]) - (b[0] - c[0]).hypot(b[1] - c[1]));
+            }
+        }
         for c in self.constraints.values() {
             match c {
                 Constraint::Fixed { point: id, at } => {
@@ -612,13 +659,13 @@ impl SketchGraph {
                 } => residual.push(circle(*id)?.1 - expression::length(expression, parameters)?),
                 Constraint::Equal { a, b } => {
                     let measure = |id| match self.entities.get(&id) {
-                        Some(Entity::Circle { .. }) => Ok(circle(id)?.1),
+                        Some(Entity::Circle { .. } | Entity::Arc { .. }) => Ok(circle(id)?.1),
                         _ => length(id),
                     };
-                    if self.entities.get(a).map(std::mem::discriminant)
-                        != self.entities.get(b).map(std::mem::discriminant)
+                    if matches!(self.entities.get(a), Some(Entity::Line { .. }))
+                        != matches!(self.entities.get(b), Some(Entity::Line { .. }))
                     {
-                        return invalid("Equal requires two lines or two circles");
+                        return invalid("Equal requires two lines or two circular entities");
                     }
                     residual.push(measure(*a)? - measure(*b)?);
                 }

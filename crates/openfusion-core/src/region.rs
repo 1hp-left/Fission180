@@ -136,7 +136,7 @@ fn relation(a: &Profile, b: &Profile) -> Relation {
         Relation::Disjoint
     }
 }
-fn point_inside(p: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+pub(crate) fn point_inside(p: [f64; 2], polygon: &[[f64; 2]]) -> bool {
     let mut inside = false;
     for i in 0..polygon.len() {
         let a = polygon[i];
@@ -201,6 +201,12 @@ impl Sketch {
                     g.profile_entities
                         .get(&self.profile_ids[*i])
                         .is_none_or(|edges| !edges.iter().any(|id| g.construction.contains(id)))
+                        && !g.entities.iter().any(|(id, e)| {
+                            !g.construction.contains(id)
+                                && matches!(e, crate::sketch::Entity::Arc { .. })
+                                && g.arc_geometry(*id)
+                                    .is_ok_and(|arc| arc.touches_profile(&self.profiles[*i]))
+                        })
                 })
             })
             .collect();
@@ -247,7 +253,7 @@ impl Sketch {
             .into_iter()
             .find(|r| r.id == id)
             .ok_or_else(|| {
-                crate::Error::Invalid("Extrusion references a missing stable region".into())
+                crate::Error::Invalid("Missing stable region or unsupported curved region boundary; no alternate region was selected".into())
             })
     }
 }

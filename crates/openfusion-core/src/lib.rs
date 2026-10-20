@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io::Cursor, path::Path};
 
 pub const EPS: f64 = 1e-5;
+pub mod arc;
 mod arrangement;
 pub mod expression;
 pub mod extrusion;

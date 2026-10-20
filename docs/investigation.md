@@ -4,6 +4,8 @@ Started: 2026-10-18. Updated: 2026-10-19. Target: Autodesk Fusion, previously ca
 
 ## Current status: installed Fusion and native Rust reconstruction
 
+[Analytic sketch arcs](sketch-arcs-2026-10-19.md) adds genuine bounded circular entities, radius/relational constraints, finite tangency checks and usable native three-point creation with retained valid preview. All 64 workspace tests pass; a fresh 1920×1080 native arc capture was inspected. Arc-bounded solid regions remain explicitly unavailable. The click order follows published Autodesk documentation; selected-build runtime matching remains blocked.
+
 [Connected line arrangement and editing batch](sketch-arrangements-2026-10-19.md) implements crossing/branched line regions, retained source-boundary identities, split/merge dependency rejection and native Trim/Extend with persisted intersection constraints. Analytic cell volumes execute on explicit OCCT/Rust backends; 56 workspace tests pass. Fresh matched Fusion interactions remain blocked; this is independent implementation evidence.
 
 [Implemented solid-command batch](features-2026-10-19.md) adds independently written application commands using explicit OCCT or scoped Rust execution: revolve, sweep, loft, hole, edge finishing, shell, face offset, transforms, patterns, Combine and Split Body. It records 17 saved/reopened native fixtures and OCCT STEP measurement checks, explicit mixed command order, face-supported sketches and dependency editing. This is implementation evidence; fresh matching Fusion command scenarios remain unverified.

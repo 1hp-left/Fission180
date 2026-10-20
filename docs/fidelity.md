@@ -52,6 +52,7 @@ The native application was manually exercised through Create Sketch → XY → R
 - Hover tooltips, marking/context menus, snap glyphs, constraint badges, live dimension entry, dock resizing, and full keyboard navigation are incomplete.
 - Entity selection, constraint actions/glyphs, constrained dragging, construction display and endpoint/midpoint/axis snapping now have implementations; their exact Fusion placement, thresholds, command states and rendering remain unmatched. See [entity editing evidence](sketch-editing-2026-10-19.md).
 - Trim/Extend now have enabled native ribbon/menu controls, command hints, source-line hover and sketch history. Connected line cells are selectable profiles. Their Fusion interaction/visual equivalence remains unverified; see [arrangement evidence](sketch-arrangements-2026-10-19.md).
+- Three-point arc creation adds a staged native command, retained valid preview, radius labels and bounded arc selection. Public endpoint/endpoint/through-point order is represented; exact reference interactions remain unverified. See [arc evidence](sketch-arcs-2026-10-19.md).
 - The active tool's extra Feature Options section in Fusion's Sketch Palette is not fully reproduced.
 - Several ribbon areas are scaffolding. The Home screen, other workspaces, and account/cloud experiences are not faithful implementations yet.
 - The initial viewport uses cached projected triangles through egui/wgpu. A dedicated depth-buffered CAD render pass and robust face/edge picking remain future work.

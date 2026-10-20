@@ -129,6 +129,7 @@ enum Tool {
     Circle,
     Polyline,
     Line,
+    Arc,
     Trim,
     Extend,
     Dimension,
@@ -226,6 +227,7 @@ pub struct FusionApp {
     close_after_capture: bool,
     pending_extrude: bool,
     pending_sketch: bool,
+    arc_draft: sketch_edit::ArcDraft,
 }
 impl FusionApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -326,6 +328,7 @@ impl FusionApp {
             close_after_capture: false,
             pending_extrude: false,
             pending_sketch: false,
+            arc_draft: Default::default(),
         };
         let args: Vec<_> = std::env::args().collect();
         if let Some(i) = args.iter().position(|a| a == "--open") {
@@ -548,6 +551,11 @@ impl FusionApp {
         Some(d)
     }
     fn cancel(&mut self) {
+        if self.tool == Tool::Arc && self.mode == Mode::Sketch {
+            self.arc_draft = Default::default();
+            self.tool = Tool::Select;
+            self.error = None;
+        }
         if let Some((base, _)) = self.sketch_drag.take() {
             self.draft = Some(base);
             return;
@@ -610,6 +618,7 @@ impl FusionApp {
     }
     fn undo(&mut self) {
         if self.mode == Mode::Sketch {
+            self.arc_draft = Default::default();
             if let Some(d) = &mut self.draft {
                 self.sketch_history.undo(d);
             }
@@ -623,6 +632,7 @@ impl FusionApp {
     }
     fn redo(&mut self) {
         if self.mode == Mode::Sketch {
+            self.arc_draft = Default::default();
             if let Some(d) = &mut self.draft {
                 self.sketch_history.redo(d);
             }
@@ -666,6 +676,13 @@ impl FusionApp {
             self.start_modeling("Hole");
         }
         if self.mode == Mode::Sketch {
+            if ctx.input(|i| !i.modifiers.ctrl && i.key_pressed(Key::A)) {
+                self.start_arc();
+            }
+            if self.tool == Tool::Arc && ctx.input(|i| i.key_pressed(Key::Enter)) {
+                self.arc_draft = Default::default();
+                self.tool = Tool::Select;
+            }
             if ctx.input(|i| i.key_pressed(Key::R)) {
                 self.tool = Tool::Rectangle;
                 self.anchor = None;
@@ -1973,6 +1990,7 @@ impl FusionApp {
                 ("Line", "L", true),
                 ("2-Point Rectangle", "R", true),
                 ("Center Diameter Circle", "C", true),
+                ("3-Point Arc", "A", true),
                 ("Polygon", "", true),
                 ("Sketch Dimension", "D", true),
                 ("Construction", "X", true),
@@ -2131,6 +2149,7 @@ impl FusionApp {
                 "Polygon" => self.tool = Tool::Polyline,
                 "2-Point Rectangle" => self.tool = Tool::Rectangle,
                 "Center Diameter Circle" => self.tool = Tool::Circle,
+                "3-Point Arc" => self.start_arc(),
                 "Sketch Dimension" => self.dimension(),
                 "Home View" => self.camera = Camera::default(),
                 "Top View" => self.camera.top = true,
@@ -2210,6 +2229,7 @@ impl FusionApp {
                     }
                 }
             }
+            self.paint_arcs(&painter, r, sketch);
         }
         let cursor = ui.input(|i| i.pointer.hover_pos());
         if self.mode == Mode::Sketch {
@@ -2314,6 +2334,9 @@ impl FusionApp {
                     }
                     if matches!(self.tool, Tool::Trim | Tool::Extend) {
                         self.paint_line_edit_hover(&painter, pos, r);
+                    }
+                    if self.tool == Tool::Arc {
+                        self.paint_arc_draft(&painter, local, r);
                     }
                     if let Some(anchor) = self.anchor {
                         if self.tool == Tool::Line {
@@ -2446,6 +2469,7 @@ impl FusionApp {
                                 self.apply_relation(name);
                             }
                             Tool::Trim | Tool::Extend => self.apply_line_edit(pos, r),
+                            Tool::Arc => self.place_arc_point(local),
                         }
                     }
                 } else if response.clicked() {
@@ -2490,6 +2514,11 @@ impl FusionApp {
                 }
                 Tool::Polyline => "Click vertices; click the first point or press Enter to close",
                 Tool::Line => "Click endpoints; Escape ends the line chain",
+                Tool::Arc => match self.arc_draft.endpoints.len() {
+                    0 => "Place first arc end point",
+                    1 => "Place second arc end point",
+                    _ => "Place a point on the arc; Enter finishes, Escape cancels",
+                },
                 Tool::Trim => "Click the line segment to remove; Escape ends Trim",
                 Tool::Extend => "Click near the line end to extend to the next sketch line",
                 Tool::Relation(_) => "Select sketch geometry to constrain; Escape ends the command",
@@ -2577,7 +2606,18 @@ impl FusionApp {
                 })
             })
             .unwrap_or(false);
-        if self.show_profiles && !construction {
+        let available = preview
+            || sketch
+                .profiles
+                .iter()
+                .position(|p| std::ptr::eq(p, profile))
+                .and_then(|i| sketch.profile_ids.get(i))
+                .is_none_or(|id| {
+                    sketch
+                        .regions()
+                        .is_ok_and(|regions| regions.iter().any(|r| r.id == *id))
+                });
+        if self.show_profiles && !construction && available {
             let fill = if selected {
                 C::from_rgba_unmultiplied(67, 131, 213, 140)
             } else {

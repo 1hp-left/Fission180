@@ -110,11 +110,11 @@ impl Sketch {
                 line: entity,
                 expression,
             },
-            Some(Entity::Circle { .. }) => Constraint::Radius {
+            Some(Entity::Circle { .. } | Entity::Arc { .. }) => Constraint::Radius {
                 circle: entity,
                 expression,
             },
-            _ => return invalid("Select a line or circle to dimension"),
+            _ => return invalid("Select a line, circle or arc to dimension"),
         };
         graph.dimension(format!("entity.{entity}"), constraint)?;
         self.with_graph(graph, parameters)
@@ -180,6 +180,9 @@ impl Sketch {
             .flat_map(|e| match e {
                 Entity::Line { a, b } => vec![*a, *b],
                 Entity::Circle { center, .. } => vec![*center],
+                Entity::Arc {
+                    center, start, end, ..
+                } => vec![*center, *start, *end],
             })
             .collect();
         removed.extend(graph.points.keys().filter(|id| !used.contains(id)).copied());

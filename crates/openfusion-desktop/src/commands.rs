@@ -167,6 +167,10 @@ impl ModelingDialog {
 }
 impl FusionApp {
     pub(super) fn start_modeling(&mut self, name: &str) {
+        if self.mode == Mode::Sketch && name == "3-Point Arc" {
+            self.start_arc();
+            return;
+        }
         if self.mode == Mode::Sketch && matches!(name, "Trim" | "Extend") {
             self.start_line_edit(name == "Extend");
             return;
