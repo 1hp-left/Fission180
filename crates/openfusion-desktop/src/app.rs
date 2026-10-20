@@ -13,6 +13,8 @@ use fission180_core::{
 use std::path::PathBuf;
 #[path = "commands.rs"]
 mod commands;
+#[path = "sketch_edit.rs"]
+mod sketch_edit;
 
 const RIBBON: C = C::from_rgb(58, 68, 83);
 const QUICK: C = C::from_rgb(34, 41, 51);
@@ -126,6 +128,7 @@ enum Tool {
     Polyline,
     Line,
     Dimension,
+    Relation(&'static str),
 }
 struct ExtrudeDialog {
     editing: Option<u64>,
@@ -179,6 +182,9 @@ pub struct FusionApp {
     anchor: Option<[f64; 2]>,
     polyline: Vec<[f64; 2]>,
     selected: Option<(u64, usize)>,
+    sketch_selection: Vec<sketch_edit::SketchPick>,
+    entity_dimension: Option<u64>,
+    sketch_drag: Option<(Sketch, u64)>,
     selected_topology: Option<Pick>,
     hovered_topology: Option<Pick>,
     extrude: Option<ExtrudeDialog>,
@@ -214,6 +220,7 @@ pub struct FusionApp {
     capture_frames: u32,
     close_after_capture: bool,
     pending_extrude: bool,
+    pending_sketch: bool,
 }
 impl FusionApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -275,6 +282,9 @@ impl FusionApp {
             anchor: None,
             polyline: vec![],
             selected: None,
+            sketch_selection: vec![],
+            entity_dimension: None,
+            sketch_drag: None,
             selected_topology: None,
             hovered_topology: None,
             extrude: None,
@@ -310,6 +320,7 @@ impl FusionApp {
             capture_frames: 0,
             close_after_capture: false,
             pending_extrude: false,
+            pending_sketch: false,
         };
         let args: Vec<_> = std::env::args().collect();
         if let Some(i) = args.iter().position(|a| a == "--open") {
@@ -322,7 +333,11 @@ impl FusionApp {
             app.close_after_capture = args.iter().any(|a| a == "--exit-after-capture");
         }
         if args.iter().any(|a| a == "--sketch") {
-            app.begin_sketch(Plane::XY);
+            if app.busy {
+                app.pending_sketch = true;
+            } else {
+                app.begin_sketch(Plane::XY);
+            }
         }
         if args.iter().any(|a| a == "--demo") {
             let mut d = Document::default();
@@ -386,6 +401,8 @@ impl FusionApp {
             }
         };
         self.sketch_history = Default::default();
+        self.sketch_selection.clear();
+        self.entity_dimension = None;
         self.draft = Some(Sketch {
             id,
             name: format!("Sketch{}", self.document.sketches.len() + 1),
@@ -523,11 +540,15 @@ impl FusionApp {
         Some(d)
     }
     fn cancel(&mut self) {
+        if let Some((base, _)) = self.sketch_drag.take() {
+            self.draft = Some(base);
+            return;
+        }
         if self.modeling.take().is_some() {
             self.send(Command::ResetPreview);
             return;
         }
-        if self.extrude.take().is_some() || self.preview {
+        if self.extrude.take().is_some() || (self.preview && self.mode == Mode::Design) {
             self.send(Command::ResetPreview);
         } else if self.anchor.take().is_some() || !self.polyline.is_empty() {
             self.polyline.clear();
@@ -538,6 +559,8 @@ impl FusionApp {
         }
         self.menu = None;
         self.show_dimension = false;
+        self.sketch_selection.clear();
+        self.entity_dimension = None;
     }
     fn save(&mut self) {
         if self.mode == Mode::Sketch {
@@ -584,6 +607,7 @@ impl FusionApp {
             }
             self.anchor = None;
             self.polyline.clear();
+            self.sketch_selection.clear();
         } else if !self.busy {
             self.send(Command::Undo);
             self.dirty = true;
@@ -594,6 +618,7 @@ impl FusionApp {
             if let Some(d) = &mut self.draft {
                 self.sketch_history.redo(d);
             }
+            self.sketch_selection.clear();
         } else if !self.busy {
             self.send(Command::Redo);
             self.dirty = true;
@@ -648,6 +673,12 @@ impl FusionApp {
             if ctx.input(|i| i.key_pressed(Key::D)) {
                 self.dimension();
             }
+            if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+                self.delete_sketch_selection();
+            }
+            if ctx.input(|i| i.key_pressed(Key::X)) {
+                self.toggle_construction();
+            }
             if ctx.input(|i| i.key_pressed(Key::Enter)) && self.polyline.len() >= 3 {
                 let points = std::mem::take(&mut self.polyline);
                 self.add_profile(Profile::Polygon { points });
@@ -678,6 +709,11 @@ impl FusionApp {
         self.anchor = None;
     }
     fn dimension(&mut self) {
+        self.tool = Tool::Dimension;
+        if self.start_entity_dimension() {
+            return;
+        }
+        self.entity_dimension = None;
         if let Some(d) = &self.draft {
             let index = self
                 .selected
@@ -955,7 +991,20 @@ impl FusionApp {
                 (759., Icon::Equal, "Equal"),
                 (802., Icon::Parallel, "Parallel"),
             ] {
-                tool_button(ui, rect(x, 80., 36., 36.), k, name, false, false);
+                let supported = matches!(
+                    name,
+                    "Horizontal / Vertical" | "Perpendicular" | "Tangent" | "Equal" | "Parallel"
+                );
+                if tool_button(
+                    ui,
+                    rect(x, 80., 36., 36.),
+                    k,
+                    name,
+                    self.tool == Tool::Relation(name),
+                    supported,
+                ) {
+                    self.start_relation(name);
+                }
             }
             for (name, x, width) in [
                 ("CREATE", 135., 258.),
@@ -1249,12 +1298,7 @@ impl FusionApp {
                             if self.busy {
                                 continue;
                             }
-                            self.sketch_history = Default::default();
-                            self.draft = Some(s.clone());
-                            self.mode = Mode::Sketch;
-                            self.camera.top = true;
-                            self.camera.plane = s.plane;
-                            self.tab = "SKETCH";
+                            self.edit_sketch(s.clone());
                         }
                         self.browser_row(ui, y, 2, &s.name, Icon::Sketch, "sketch-item");
                         y += 24.;
@@ -1486,12 +1530,7 @@ impl FusionApp {
                     if self.busy {
                         continue;
                     }
-                    self.sketch_history = Default::default();
-                    self.draft = Some(s.clone());
-                    self.mode = Mode::Sketch;
-                    self.camera.top = true;
-                    self.camera.plane = s.plane;
-                    self.tab = "SKETCH";
+                    self.edit_sketch(s.clone());
                 }
             }
             x += 30.;
@@ -2020,6 +2059,10 @@ impl FusionApp {
         if !self.show_dimension {
             return;
         }
+        if self.entity_dimension.is_some() {
+            self.entity_dimension_palette(ui, w);
+            return;
+        }
         let p = ui.painter().clone();
         let r = rect(w - 540., 286., 260., 170.);
         p.rect(
@@ -2137,7 +2180,22 @@ impl FusionApp {
                 ("Center Diameter Circle", "C", true),
                 ("Polygon", "", true),
                 ("Sketch Dimension", "D", true),
+                ("Construction", "X", true),
             ],
+            "CONSTRAINTS" if self.mode == Mode::Sketch => vec![
+                ("Horizontal / Vertical", "", true),
+                ("Coincident", "", true),
+                ("Concentric", "", true),
+                ("Midpoint", "", true),
+                ("Parallel", "", true),
+                ("Perpendicular", "", true),
+                ("Tangent", "", true),
+                ("Equal", "", true),
+                ("Fix / UnFix", "", true),
+            ],
+            "MODIFY" if self.mode == Mode::Sketch => {
+                vec![("Construction", "X", true), ("Delete", "Del", true)]
+            }
             "CREATE" => vec![
                 ("Create Sketch", "", true),
                 ("Extrude", "E", true),
@@ -2219,6 +2277,17 @@ impl FusionApp {
         if let Some(action) = action {
             self.menu = None;
             match action {
+                "Horizontal / Vertical"
+                | "Coincident"
+                | "Concentric"
+                | "Midpoint"
+                | "Parallel"
+                | "Perpendicular"
+                | "Tangent"
+                | "Equal"
+                | "Fix / UnFix" => self.start_relation(action),
+                "Construction" => self.toggle_construction(),
+                "Delete" => self.delete_sketch_selection(),
                 "New Design" => {
                     if !self.busy {
                         self.send(Command::New);
@@ -2326,7 +2395,16 @@ impl FusionApp {
                                 .camera
                                 .project(sketch.plane.point(*b, sketch.origin).to_array(), r)
                                 .0;
-                            painter.line_segment([a, b], Stroke::new(1.3, ACCENT));
+                            if graph.construction.contains(id) {
+                                painter.extend(Shape::dashed_line(
+                                    &[a, b],
+                                    Stroke::new(1.2, ACCENT),
+                                    6.,
+                                    4.,
+                                ));
+                            } else {
+                                painter.line_segment([a, b], Stroke::new(1.3, ACCENT));
+                            }
                             if self.show_points {
                                 painter.circle_filled(a, 2., TEXT);
                                 painter.circle_filled(b, 2., TEXT);
@@ -2337,6 +2415,9 @@ impl FusionApp {
             }
         }
         let cursor = ui.input(|i| i.pointer.hover_pos());
+        if self.mode == Mode::Sketch {
+            self.paint_sketch_selection(&painter, r);
+        }
         let interaction_blocked = self.menu.is_some()
             || self.show_dimension
             || cursor.is_some_and(|p| {
@@ -2372,6 +2453,9 @@ impl FusionApp {
                 } else {
                     self.camera.pan += delta;
                 }
+            }
+            if sketch_active && self.tool == Tool::Select {
+                self.drag_sketch_point(ui, &response, r);
             }
             if sketch_active && self.tool != Tool::Select && self.tool != Tool::Dimension {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -2416,9 +2500,20 @@ impl FusionApp {
                         self.planes(ui, r, &painter, pos, response.clicked());
                     }
                 } else if sketch_active {
-                    let mut local = self.camera.unproject(pos, r);
+                    let mut local = self.sketch_local(pos, r);
                     if self.snap {
-                        local = local.map(|n| (n / 1.).round() * 1.);
+                        let snap = self.sketch_snap(local);
+                        local = snap.0;
+                        if let Some(kind) = snap.1 {
+                            if let Some(s) = &self.draft {
+                                let at = self
+                                    .camera
+                                    .project(s.plane.point(local, s.origin).to_array(), r)
+                                    .0;
+                                painter.circle_stroke(at, 5., Stroke::new(1., ACCENT));
+                                label(&painter, at + vec2(9., -9.), kind, 11., TEXT);
+                            }
+                        }
                     }
                     if let Some(anchor) = self.anchor {
                         if self.tool == Tool::Line {
@@ -2538,10 +2633,17 @@ impl FusionApp {
                                 }
                             }
                             Tool::Select | Tool::Dimension => {
-                                self.pick_profile(pos, r, &sketches);
+                                let multiple = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+                                if !self.select_sketch_item(pos, r, multiple) {
+                                    self.pick_profile(pos, r, &sketches);
+                                }
                                 if self.tool == Tool::Dimension {
                                     self.dimension();
                                 }
+                            }
+                            Tool::Relation(name) => {
+                                self.select_sketch_item(pos, r, true);
+                                self.apply_relation(name);
                             }
                         }
                     }
@@ -2587,6 +2689,7 @@ impl FusionApp {
                 }
                 Tool::Polyline => "Click vertices; click the first point or press Enter to close",
                 Tool::Line => "Click endpoints; Escape ends the line chain",
+                Tool::Relation(_) => "Select sketch geometry to constrain; Escape ends the command",
                 _ => "",
             }
         } else {
@@ -2658,23 +2761,44 @@ impl FusionApp {
         } else {
             C::from_rgb(66, 153, 192)
         };
-        if self.show_profiles && !matches!(profile, Profile::Polygon { .. }) {
-            p.add(Shape::convex_polygon(
-                points.clone(),
-                if selected {
-                    C::from_rgba_unmultiplied(67, 131, 213, 140)
-                } else {
-                    C::from_rgba_unmultiplied(64, 102, 123, 83)
-                },
-                Stroke::NONE,
-            ));
+        let construction = sketch
+            .profiles
+            .iter()
+            .position(|p| std::ptr::eq(p, profile))
+            .and_then(|i| sketch.profile_ids.get(i))
+            .and_then(|id| {
+                sketch.graph.as_ref().and_then(|g| {
+                    g.profile_entities
+                        .get(id)
+                        .map(|edges| edges.iter().any(|e| g.construction.contains(e)))
+                })
+            })
+            .unwrap_or(false);
+        if self.show_profiles && !construction {
+            let fill = if selected {
+                C::from_rgba_unmultiplied(67, 131, 213, 140)
+            } else {
+                C::from_rgba_unmultiplied(64, 102, 123, 83)
+            };
+            let mut mesh = egui::Mesh::default();
+            for point in &points {
+                mesh.colored_vertex(*point, fill);
+            }
+            for triangle in crate::view::triangulate_polygon(&points) {
+                mesh.add_triangle(triangle[0] as u32, triangle[1] as u32, triangle[2] as u32);
+            }
+            p.add(Shape::mesh(mesh));
         }
         let mut path = points.clone();
         path.push(path[0]);
-        p.add(Shape::line(
-            path,
-            Stroke::new(if selected { 1.7 } else { 1.1 }, col),
-        ));
+        if construction {
+            p.extend(Shape::dashed_line(&path, Stroke::new(1.2, col), 6., 4.));
+        } else {
+            p.add(Shape::line(
+                path,
+                Stroke::new(if selected { 1.7 } else { 1.1 }, col),
+            ));
+        }
         if self.show_points
             && self.mode == Mode::Sketch
             && !matches!(profile, Profile::Circle { .. })
@@ -2686,6 +2810,7 @@ impl FusionApp {
         if self.show_constraints
             && self.mode == Mode::Sketch
             && !preview
+            && self.draft.is_none()
             && sketch.graph.as_ref().is_some_and(|g| {
                 g.constraints.values().any(|c| {
                     matches!(
@@ -2832,6 +2957,8 @@ impl eframe::App for FusionApp {
                     self.modeling = None;
                     self.selected_topology = None;
                     self.hovered_topology = None;
+                    self.sketch_selection.clear();
+                    self.entity_dimension = None;
                     self.sketch_history = Default::default();
                 }
             }
@@ -2873,6 +3000,16 @@ impl eframe::App for FusionApp {
                 }
             }
             if !self.busy {
+                if self.pending_sketch {
+                    self.pending_sketch = false;
+                    if self.error.is_none() {
+                        if let Some(s) = self.document.sketches.last().cloned() {
+                            self.edit_sketch(s);
+                        } else {
+                            self.begin_sketch(Plane::XY);
+                        }
+                    }
+                }
                 if let Some(name) = self.pending_modeling.take() {
                     if self.error.is_none() {
                         self.start_modeling(&name);

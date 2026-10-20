@@ -24,6 +24,14 @@ pub enum Constraint {
         a: u64,
         b: u64,
     },
+    Midpoint {
+        point: u64,
+        line: u64,
+    },
+    Concentric {
+        a: u64,
+        b: u64,
+    },
     Horizontal {
         line: u64,
     },
@@ -76,6 +84,8 @@ pub struct SketchGraph {
     pub constraints: BTreeMap<u64, Constraint>,
     pub profile_entities: BTreeMap<u64, Vec<u64>>,
     pub dimension_ids: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub construction: std::collections::BTreeSet<u64>,
 }
 impl Default for SketchGraph {
     fn default() -> Self {
@@ -86,6 +96,7 @@ impl Default for SketchGraph {
             constraints: Default::default(),
             profile_entities: Default::default(),
             dimension_ids: Default::default(),
+            construction: Default::default(),
         }
     }
 }
@@ -135,6 +146,13 @@ impl SketchGraph {
                 }
             }
         }
+        if self
+            .construction
+            .iter()
+            .any(|id| !self.entities.contains_key(id))
+        {
+            return invalid("Construction state references a missing entity");
+        }
         for entities in self.profile_entities.values() {
             if entities.is_empty() || entities.iter().any(|id| !self.entities.contains_key(id)) {
                 return invalid("Profile entity dependencies are missing");
@@ -143,6 +161,14 @@ impl SketchGraph {
         for id in self.dimension_ids.values() {
             if !self.constraints.contains_key(id) {
                 return invalid("Dimension constraint dependency is missing");
+            }
+        }
+        for c in self.constraints.values() {
+            if c.references()
+                .iter()
+                .any(|id| !self.points.contains_key(id) && !self.entities.contains_key(id))
+            {
+                return invalid("Constraint references missing geometry");
             }
         }
         Ok(())
@@ -231,13 +257,7 @@ impl SketchGraph {
                 _ => invalid("Circle binding changed type"),
             },
             _ => {
-                let points: Vec<_> = entities
-                    .iter()
-                    .map(|id| match self.entities.get(id) {
-                        Some(Entity::Line { a, .. }) => point(a),
-                        _ => invalid("Loop binding is not a line"),
-                    })
-                    .collect::<Result<_>>()?;
+                let points = self.loop_points(entities)?;
                 if matches!(original, Profile::Rectangle { .. }) {
                     if points.len() != 4
                         || (points[0][1] - points[1][1]).abs() > EPS
@@ -245,7 +265,7 @@ impl SketchGraph {
                         || (points[2][1] - points[3][1]).abs() > EPS
                         || (points[3][0] - points[0][0]).abs() > EPS
                     {
-                        return invalid("Rectangle graph lost its orthogonal constraints");
+                        return Ok(Profile::Polygon { points });
                     }
                     Ok(Profile::Rectangle {
                         a: points[0],
@@ -257,7 +277,7 @@ impl SketchGraph {
             }
         }
     }
-    fn dimension(&mut self, key: String, constraint: Constraint) -> Result<()> {
+    pub fn dimension(&mut self, key: String, constraint: Constraint) -> Result<()> {
         if let Some(id) = self.dimension_ids.get(&key) {
             self.constraints.insert(*id, constraint);
         } else {
@@ -441,14 +461,17 @@ impl SketchGraph {
         let initial = self.residuals(p)?;
         let mut jac = vec![vec![0.; x.len()]; initial.len()];
         for i in 0..x.len() {
-            let h = 1e-5 * (1. + x[i].abs());
+            let h = 1e-6 * (1. + x[i].abs());
             let mut values = x.to_vec();
             values[i] += h;
             let mut perturbed = self.clone();
             apply(&mut perturbed, &values);
             let r = perturbed.residuals(p)?;
+            values[i] = x[i] - h;
+            apply(&mut perturbed, &values);
+            let negative = perturbed.residuals(p)?;
             for row in 0..r.len() {
-                jac[row][i] = (r[row] - initial[row]) / h;
+                jac[row][i] = (r[row] - negative[row]) / (2. * h);
             }
         }
         Ok(jac)
@@ -490,6 +513,16 @@ impl SketchGraph {
                     let b = point(*b)?;
                     residual.extend([a[0] - b[0], a[1] - b[1]]);
                 }
+                Constraint::Midpoint { point: p, line: l } => {
+                    let p = point(*p)?;
+                    let (a, b) = line(*l)?;
+                    residual.extend([p[0] - (a[0] + b[0]) * 0.5, p[1] - (a[1] + b[1]) * 0.5]);
+                }
+                Constraint::Concentric { a, b } => {
+                    let a = circle(*a)?.0;
+                    let b = circle(*b)?.0;
+                    residual.extend([a[0] - b[0], a[1] - b[1]]);
+                }
                 Constraint::Horizontal { line } => residual.push(delta(*line)?[1]),
                 Constraint::Vertical { line } => residual.push(delta(*line)?[0]),
                 Constraint::DistanceX {
@@ -520,7 +553,18 @@ impl SketchGraph {
                     circle: id,
                     expression,
                 } => residual.push(circle(*id)?.1 - expression::length(expression, parameters)?),
-                Constraint::Equal { a, b } => residual.push(length(*a)? - length(*b)?),
+                Constraint::Equal { a, b } => {
+                    let measure = |id| match self.entities.get(&id) {
+                        Some(Entity::Circle { .. }) => Ok(circle(id)?.1),
+                        _ => length(id),
+                    };
+                    if self.entities.get(a).map(std::mem::discriminant)
+                        != self.entities.get(b).map(std::mem::discriminant)
+                    {
+                        return invalid("Equal requires two lines or two circles");
+                    }
+                    residual.push(measure(*a)? - measure(*b)?);
+                }
                 Constraint::Parallel { a, b } | Constraint::Perpendicular { a, b } => {
                     let da = delta(*a)?;
                     let db = delta(*b)?;
@@ -645,10 +689,7 @@ impl crate::Sketch {
         if (a[1] - b[1]).abs() < EPS {
             graph.constrain(Constraint::Horizontal { line })?;
         }
-        let (solved, _) = graph.solve(parameters)?;
-        let mut s = self.clone();
-        s.graph = Some(solved);
-        Ok(s)
+        self.with_graph(graph, parameters)
     }
     pub fn with_dimensions(
         &self,

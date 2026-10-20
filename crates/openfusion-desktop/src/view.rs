@@ -1,6 +1,79 @@
 use eframe::egui::{self, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, Vec2, pos2, vec2};
 use fission180_core::kernel::native::TopologyId;
 use fission180_core::{DisplayMesh, Plane};
+/// Ear clipping for display of validated simple sketch polygons.
+pub fn triangulate_polygon(points: &[Pos2]) -> Vec<[usize; 3]> {
+    if points.len() < 3 {
+        return vec![];
+    }
+    let cross = |a: Pos2, b: Pos2, c: Pos2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    let area: f32 = (0..points.len())
+        .map(|i| {
+            points[i].x * points[(i + 1) % points.len()].y
+                - points[(i + 1) % points.len()].x * points[i].y
+        })
+        .sum();
+    let sign = area.signum();
+    let mut ring: Vec<_> = (0..points.len()).collect();
+    let mut triangles = vec![];
+    while ring.len() > 3 {
+        let ear = (0..ring.len()).find(|i| {
+            let a = ring[(*i + ring.len() - 1) % ring.len()];
+            let b = ring[*i];
+            let c = ring[(*i + 1) % ring.len()];
+            if cross(points[a], points[b], points[c]) * sign <= 1e-7 {
+                return false;
+            }
+            !ring
+                .iter()
+                .filter(|p| **p != a && **p != b && **p != c)
+                .any(|p| {
+                    cross(points[a], points[b], points[*p]) * sign >= -1e-7
+                        && cross(points[b], points[c], points[*p]) * sign >= -1e-7
+                        && cross(points[c], points[a], points[*p]) * sign >= -1e-7
+                })
+        });
+        let Some(i) = ear else {
+            return vec![];
+        };
+        triangles.push([
+            ring[(i + ring.len() - 1) % ring.len()],
+            ring[i],
+            ring[(i + 1) % ring.len()],
+        ]);
+        ring.remove(i);
+    }
+    triangles.push([ring[0], ring[1], ring[2]]);
+    triangles
+}
+#[cfg(test)]
+mod polygon_tests {
+    use super::*;
+    #[test]
+    fn concave_profile_display_preserves_area_in_either_orientation() {
+        let mut points = vec![
+            pos2(0., 0.),
+            pos2(40., 0.),
+            pos2(40., 30.),
+            pos2(25., 30.),
+            pos2(25., 15.),
+            pos2(0., 15.),
+        ];
+        for _ in 0..2 {
+            let triangles = triangulate_polygon(&points);
+            assert_eq!(triangles.len(), 4);
+            let area: f32 = triangles
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|i| points[i]);
+                    ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
+                })
+                .sum();
+            assert!((area - 825.).abs() < 1e-4);
+            points.reverse();
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
     Face(TopologyId),

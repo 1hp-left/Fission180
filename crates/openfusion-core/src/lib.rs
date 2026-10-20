@@ -10,6 +10,7 @@ pub mod kernel;
 pub mod persistence;
 pub mod region;
 pub mod sketch;
+mod sketch_edit;
 use kernel::{Backend, ExtrudeInput, Geometry, SolidKernel};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -194,11 +194,20 @@ impl Sketch {
         if self.profile_ids.len() != self.profiles.len() {
             return invalid("Profile identity array does not match geometry");
         }
-        let n = self.profiles.len();
+        let active: Vec<_> = (0..self.profiles.len())
+            .filter(|i| {
+                self.graph.as_ref().is_none_or(|g| {
+                    g.profile_entities
+                        .get(&self.profile_ids[*i])
+                        .is_none_or(|edges| !edges.iter().any(|id| g.construction.contains(id)))
+                })
+            })
+            .collect();
+        let n = active.len();
         let mut contains = vec![vec![false; n]; n];
         for i in 0..n {
             for j in i + 1..n {
-                match relation(&self.profiles[i], &self.profiles[j]) {
+                match relation(&self.profiles[active[i]], &self.profiles[active[j]]) {
                     Relation::Contains => contains[i][j] = true,
                     Relation::Inside => contains[j][i] = true,
                     Relation::Disjoint => {}
@@ -212,13 +221,13 @@ impl Sketch {
         }
         Ok((0..n)
             .map(|i| Region {
-                id: self.profile_ids[i],
-                outer: self.profile_ids[i],
+                id: self.profile_ids[active[i]],
+                outer: self.profile_ids[active[i]],
                 inner: (0..n)
                     .filter(|j| {
                         contains[i][*j] && !(0..n).any(|k| contains[i][k] && contains[k][*j])
                     })
-                    .map(|j| self.profile_ids[j])
+                    .map(|j| self.profile_ids[active[j]])
                     .collect(),
             })
             .collect())

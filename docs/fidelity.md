@@ -50,6 +50,7 @@ The native application was manually exercised through Create Sketch → XY → R
 - Typography and antialiasing use egui rather than Qt; no exact whole-screen pixel-error threshold has been achieved or asserted.
 - View-cube labels and interactions are simplified. Grid projection, labels, and contrast still need broader camera-state comparison.
 - Hover tooltips, marking/context menus, snap glyphs, constraint badges, live dimension entry, dock resizing, and full keyboard navigation are incomplete.
+- Entity selection, constraint actions/glyphs, constrained dragging, construction display and endpoint/midpoint/axis snapping now have implementations; their exact Fusion placement, thresholds, command states and rendering remain unmatched. See [entity editing evidence](sketch-editing-2026-10-19.md).
 - The active tool's extra Feature Options section in Fusion's Sketch Palette is not fully reproduced.
 - Several ribbon areas are scaffolding. The Home screen, other workspaces, and account/cloud experiences are not faithful implementations yet.
 - The initial viewport uses cached projected triangles through egui/wgpu. A dedicated depth-buffered CAD render pass and robust face/edge picking remain future work.
