@@ -1,6 +1,6 @@
 # Fission 180 development
 
-Formerly OpenFusion. Active Cargo packages use `fission180-*` and the desktop executable is `fission180.exe`. Keep the existing source/evidence paths and version-1 `.ofrust` format (`openfusion-native`) compatible. The archived prototype and historical audit retain their original identity.
+Formerly OpenFusion. Active Cargo packages use `fission180-*` and the desktop executable is `fission180.exe`. Keep the existing source/evidence paths and version-1 `.ofrust` format (`openfusion-native`) compatible. Historical audits retain their original identity. The TypeScript prototype was removed at the user's request; its old source exists only in Git history.
 
 Build an independent open-source CAD application. The user requires a near pixel-for-pixel Fusion desktop interface and a native Rust implementation. Sketching and solid modeling remain the first functional scope. Do not substitute a headless CLI or a generic redesigned interface for that goal.
 
@@ -15,14 +15,14 @@ Build an independent open-source CAD application. The user requires a near pixel
 
 ## Modeling
 
-- Use real OpenCascade solids for modeling operations. Meshes are for display/export.
+- Retain OpenCascade as the default solid backend while progressively implementing an independently written native Rust B-rep kernel behind the explicit backend boundary. Unsupported Rust operations must fail explicitly; never silently fall back to OCCT. Meshes are for display/export and never authoritative solid geometry.
 - Document dimensions are millimetres. Version and validate persisted data.
 - Preserve the last good document and geometry on failed edits. Keep feature dependencies explicit.
 - Await session edits. Dispose owned kernel-backed shapes on success and failure paths.
 - Keep geometry logic independent of the future GUI.
-- Run `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace` for Rust changes. Add meaningful analytic or interoperability checks for new operations. For changes to the archived TypeScript prototype, run its npm checks from `legacy/typescript-prototype`.
+- Run `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace` for Rust changes. Add meaningful analytic or interoperability checks for new operations.
 - Use the observed Fusion layout and compare actual screenshots. Preserve system DPI scaling. Do not claim pixel perfection or feature parity without evidence.
-- Rust owns the active app. The archived TypeScript prototype must not become a runtime dependency.
+- Rust owns the active app. Do not introduce a TypeScript/browser runtime dependency.
 
 ## Current layout
 
@@ -30,4 +30,3 @@ Build an independent open-source CAD application. The user requires a near pixel
 - `crates/openfusion-desktop/`: Rust/egui/wgpu interface, original vector icons, viewport and geometry worker.
 - `examples/`: native `.ofrust` documents.
 - `docs/fidelity.md`: visual target and gaps.
-- `legacy/typescript-prototype/`: archived initial experiment, outside the active Rust runtime.

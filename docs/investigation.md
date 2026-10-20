@@ -18,7 +18,7 @@ The independent application was renamed **Fission 180** (formerly OpenFusion) on
 
 [Independent parity audit, 2026-10-19](audit-2026-10-19.md) rechecked the current executable/artifact identities and 125% DPI, built and operated current Rust code, reproduced a failed-Open/Save overwrite and sketch-history defects, and ran independent topology/dependency probes. Full 1:1 parity is not established. Current Fusion Preferences says Match Device Theme with dark-blue appearance. A persistent black/stale reference viewport capture blocked dependable matched-camera geometry comparisons; the audit distinguishes those blockers from observed product defects and includes a coverage matrix and next acceptance tests.
 
-The user corrected the implementation direction: a near pixel-for-pixel Fusion interface built in Rust is required. The original TypeScript CLI has been archived under `legacy/typescript-prototype`; it is not part of the native runtime.
+The user corrected the implementation direction: a near pixel-for-pixel Fusion interface built in Rust is required. The original TypeScript CLI was first archived, then removed from the repository's working tree at the user's explicit request on 2026-10-19. Its historical implementation remains in Git history. The active application is native Rust.
 
 Selected executable: `C:\Users\Vnm4\AppData\Local\Autodesk\webdeploy\production\736d2b4c5e6b95e77c11721da222cf21c6a1fc1f\Fusion360.exe`.
 

@@ -1,6 +1,6 @@
 # Fission 180
 
-Formerly OpenFusion. The active Cargo packages are `fission180-core` and `fission180-desktop`, and the executable is `fission180.exe`. The `openfusion-native` identifier is retained. Version-1 and version-2 documents have explicit in-memory migration; new saves use version 3 for stable references, constraints, expressions and ordered solid commands. Source directories and external evidence paths retain their original names so audit links remain usable. The archived TypeScript prototype retains its historical identity.
+Formerly OpenFusion. The active Cargo packages are `fission180-core` and `fission180-desktop`, and the executable is `fission180.exe`. The `openfusion-native` identifier is retained. Version-1 and version-2 documents have explicit in-memory migration; new saves use version 3 for stable references, constraints, expressions and ordered solid commands. Source directories and external evidence paths retain their original names so audit links remain usable. The former TypeScript prototype was removed; this source tree contains the native Rust implementation.
 
 The [Fusion architecture and kernel research](docs/fusion-engine-research-2026-10-19.md) explains the current OCCT choice and the proposed path toward an independently written Rust kernel while pursuing measured 1:1 Fusion behavior.
 
@@ -79,6 +79,5 @@ Reproducible screenshot commands:
 - `docs/rea-native.md`: Ghidra function findings, exact evidence, and reconstruction limits.
 - `docs/parity.md`: product coverage and pending comparison scenarios.
 - `docs/fidelity.md`: measured visual target and remaining differences.
-- `legacy/typescript-prototype/`: archived initial CLI experiment. It is not used by the Rust app.
 
 Original Fission 180 code is MIT licensed. OpenCascade and other dependencies retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md). This is an independent application.

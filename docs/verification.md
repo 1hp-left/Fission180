@@ -19,7 +19,7 @@ Verified on Windows, baseline 2026-10-18 and measured-reference follow-up 2026-1
 - `cargo fmt --all -- --check`: passed.
 - `cargo check --workspace`: passed.
 - `cargo test --workspace`: seven native tests passed. These cover analytic extrusion volumes, cut/join/intersection, STEP round trips, invalid-edit rollback, undo/redo, three sketch planes, negative distances, polygon rejection, document versions, viewport coordinate projection, Ctrl-key chords whose modifiers are released within the same frame, and the measured Fusion reference below.
-- The archived TypeScript prototype also retains its original passing type check and 15 tests. It is not linked to the Rust application.
+- Historically, the TypeScript prototype passed its type check and 15 tests. That prototype has since been removed from the current tree at the user's request; it was never linked to the Rust application.
 - Native UI smoke sequence: Create Sketch → XY plane → R → corners at the origin and 40 × 20 mm → E → distance 10 mm preview → OK. The native worker committed a solid and updated Browser/timeline state.
 - The final optimized executable was manually checked with Ctrl+Z and Ctrl+Y: undo removed the demo document's solid and timeline features; redo restored them. The release window was left open with the sample solid.
 - Release framebuffer captures were generated for blank Design, blank Sketch, and a committed solid at 1920 × 1080 physical pixels / 125% display scale.

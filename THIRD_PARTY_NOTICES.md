@@ -16,6 +16,6 @@ The Rust binding downloads a prebuilt native OCCT archive during the first build
 
 The application reads Segoe UI and Segoe Symbols from the local Windows installation and falls back to egui's bundled fonts. Microsoft font files are not redistributed. Autodesk binaries and assets are not included in this source tree; toolbar icons are original vector drawings.
 
-The archived TypeScript experiment uses Replicad (MIT), replicad-opencascadejs (LGPL-2.1-only package declaration), and Zod (MIT). Those npm dependencies and the WebAssembly kernel are not used by the native Rust app.
+The former TypeScript experiment and its npm dependency manifests have been removed from the current source tree. Historical versions and their dependency declarations remain in Git history.
 
 For transitive and development dependencies, consult the locked package manifests and distributed license files. This list identifies major runtime components and is not a complete license inventory for a future application distribution.
