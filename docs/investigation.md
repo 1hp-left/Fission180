@@ -4,6 +4,11 @@ Started: 2026-10-18. Updated: 2026-10-20. Target: Autodesk Fusion, previously ca
 
 ## Current status: installed Fusion and native Rust reconstruction
 
+[Analytic planar and same-axis prism Booleans](planar-prisms-2026-10-20.md)
+adds independent line/arc Union, Difference and Intersection, circles and holes,
+shared/coincident boundaries, disconnected outputs and native extrusion/Combine
+replay. Analytic and labeled OCCT oracle checks are distinct from Fusion parity.
+
 [Contained partial-depth curved cuts](contained-curved-cuts-2026-10-20.md) extends the Rust backend with cap-entering analytic pockets, inward walls and planar floors, disjoint successive cuts, replay/history and explicit unsupported intersections. It retains OCCT as the default and does not claim general curved Booleans.
 
 [Exact curved-region Rust extrusion](curved-engine-2026-10-20.md) implements analytic line/arc loops, virtual line/arc and arc/arc arrangements, trimmed cylindrical B-rep extrusion, stable source provenance and complete extrusion boundary dependencies. Version-5 saves retain versions 1–4 readability. OCCT remains the default; independent analytic, topology, replay and test-only OCCT/STEP checks are recorded separately from Fusion parity. UI development and runtime automation remain deferred.

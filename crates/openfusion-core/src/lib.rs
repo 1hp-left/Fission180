@@ -13,6 +13,7 @@ pub mod features;
 pub mod kernel;
 mod line_edit;
 pub mod persistence;
+pub mod planar;
 pub mod region;
 pub mod sketch;
 mod sketch_edit;
@@ -710,17 +711,21 @@ impl Model {
                         | features::FeatureKind::Combine { .. }
                         | features::FeatureKind::Hole { .. }
                 ) {
-                    outcome.solids.sort_by(|a, b| {
-                        a.bounds()
-                            .into_iter()
-                            .flatten()
-                            .zip(b.bounds().into_iter().flatten())
-                            .map(|(a, b)| a.total_cmp(&b))
-                            .find(|o| !o.is_eq())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    outcome.solids.sort_by(Geometry::output_cmp);
                 }
                 let outputs = if feature.outputs.len() != outcome.solids.len() {
+                    if !feature.outputs.is_empty()
+                        && matches!(
+                            feature.kind,
+                            features::FeatureKind::Combine { .. }
+                                | features::FeatureKind::SplitBody { .. }
+                                | features::FeatureKind::Hole { .. }
+                        )
+                    {
+                        return invalid(
+                            "Feature result count changed; repair output references explicitly",
+                        );
+                    }
                     if !allocate_outputs {
                         return invalid(
                             "Feature output identities must be materialized before replay",
@@ -801,15 +806,7 @@ impl Model {
                     document.backend.boolean(target, &tool, operation, e.id)?
                 }
             };
-            solids.sort_by(|a, b| {
-                a.bounds()
-                    .into_iter()
-                    .flatten()
-                    .zip(b.bounds().into_iter().flatten())
-                    .map(|(x, y)| x.total_cmp(&y))
-                    .find(|o| !o.is_eq())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            solids.sort_by(Geometry::output_cmp);
             let outputs = if e.result_body_ids.is_empty() {
                 if solids.len() > 1 {
                     if !allocate_outputs {
@@ -958,6 +955,7 @@ impl Session {
     }
     pub fn replace(&mut self, document: Document) -> Result<()> {
         let (document, model) = Model::prepare(&document)?;
+        self.check_output_ancestry(&model)?;
         model.display_mesh()?;
         self.commit(document, model);
         Ok(())
@@ -969,9 +967,30 @@ impl Session {
         mesh: impl FnOnce(&Model) -> Result<DisplayMesh>,
     ) -> Result<DisplayMesh> {
         let (document, model) = Model::prepare(&document)?;
+        self.check_output_ancestry(&model)?;
         let display = mesh(&model)?;
         self.commit(document, model);
         Ok(display)
+    }
+    fn check_output_ancestry(&self, model: &Model) -> Result<()> {
+        for old in &self.model.bodies {
+            let Some(new) = model.bodies.iter().find(|b| b.id == old.id) else {
+                continue;
+            };
+            if let (Geometry::Rust(a), Geometry::Rust(b)) = (&old.solid, &new.solid) {
+                let same_producer = a.provenance.last().map(|p| p.feature)
+                    == b.provenance.last().map(|p| p.feature);
+                if same_producer
+                    && a.output_signature().is_some()
+                    && a.output_signature() != b.output_signature()
+                {
+                    return invalid(
+                        "Boolean output ancestry changed by a split/merge or boundary replacement; repair dependencies explicitly",
+                    );
+                }
+            }
+        }
+        Ok(())
     }
     fn commit(&mut self, document: Document, model: Model) {
         self.undo

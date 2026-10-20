@@ -43,4 +43,10 @@ These are pending comparison protocols, not completed tests. Link each completed
 
 ## Independent engine phase — 2026-10-20
 
+[Analytic planar and same-axis prism Booleans](planar-prisms-2026-10-20.md) adds
+line/arc region operations and uniform-prism Cut/Join/Intersect, including
+sidewall crossings, annular tools and disconnected bodies. Scoped source
+identities and transactional replay are checked independently; no new Fusion
+workflow or visual parity claim is made. OCCT remains the default.
+
 [Exact curved regions and extrusion](curved-engine-2026-10-20.md) records the Rust implementation and its analytic/interoperability acceptance. No fresh Fusion runtime or UI comparison was attempted. [Contained blind curved cuts](contained-curved-cuts-2026-10-20.md) now execute on Rust with validated topology, replay and disjoint-void restrictions. General curved Booleans and kernel replacement remain incomplete; the default backend is still OCCT.

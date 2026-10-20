@@ -87,6 +87,20 @@ impl SolidKernel for Backend {
     }
 }
 impl Geometry {
+    pub(crate) fn output_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if let (Self::Rust(a), Self::Rust(b)) = (self, other) {
+            if let (Some(a), Some(b)) = (a.output_signature(), b.output_signature()) {
+                return a.cmp(&b);
+            }
+        }
+        self.bounds()
+            .into_iter()
+            .flatten()
+            .zip(other.bounds().into_iter().flatten())
+            .map(|(a, b)| a.total_cmp(&b))
+            .find(|o| !o.is_eq())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
     pub fn backend(&self) -> Backend {
         match self {
             Self::Occt(_) => Backend::Occt,

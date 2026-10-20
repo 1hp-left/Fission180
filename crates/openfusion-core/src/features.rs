@@ -579,11 +579,13 @@ impl Feature {
                 let spacing = length(spacing)?;
                 (1..*count)
                     .map(|i| {
-                        translate(
-                            &t.solid,
-                            (axis.vector() * (spacing * i as f64)).to_array(),
-                            self.id,
-                        )
+                        let vector = (axis.vector() * (spacing * i as f64)).to_array();
+                        if let Geometry::Rust(s) = &t.solid {
+                            return Ok(Geometry::Rust(
+                                s.translated_instance(vector, self.id, i as u64)?,
+                            ));
+                        }
+                        translate(&t.solid, vector, self.id)
                     })
                     .collect::<Result<_>>()?
             }

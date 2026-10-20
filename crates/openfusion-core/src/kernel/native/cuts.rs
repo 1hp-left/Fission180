@@ -9,14 +9,14 @@ pub(super) struct Pocket {
     pub input: ExtrudeInput,
     pub opening_cap: usize,
 }
-fn interval(input: &ExtrudeInput) -> [f64; 2] {
+pub(super) fn interval(input: &ExtrudeInput) -> [f64; 2] {
     let start = dot(input.origin, input.plane.normal().to_array());
     [
         start.min(start + input.distance),
         start.max(start + input.distance),
     ]
 }
-fn shifted(profile: &Profile, delta: [f64; 2]) -> Profile {
+pub(super) fn shifted(profile: &Profile, delta: [f64; 2]) -> Profile {
     let at = |p: [f64; 2]| [p[0] + delta[0], p[1] + delta[1]];
     match profile {
         Profile::Rectangle { a, b } => Profile::Rectangle {
@@ -50,7 +50,7 @@ fn shifted(profile: &Profile, delta: [f64; 2]) -> Profile {
         },
     }
 }
-fn reframe(target: &ExtrudeInput, tool: &ExtrudeInput) -> Option<ExtrudeInput> {
+pub(super) fn reframe(target: &ExtrudeInput, tool: &ExtrudeInput) -> Option<ExtrudeInput> {
     if target.plane != tool.plane {
         return None;
     }

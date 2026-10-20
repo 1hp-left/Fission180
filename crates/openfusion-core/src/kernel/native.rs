@@ -4,6 +4,7 @@ use super::ExtrudeInput;
 use crate::{DisplayMesh, EPS, Operation, Plane, Profile, Result, invalid};
 use serde::{Deserialize, Serialize};
 mod cuts;
+mod prisms;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Tolerance {
@@ -416,6 +417,8 @@ pub struct NativeSolid {
     body_id: u64,
     topology: Brep,
     pockets: Vec<cuts::Pocket>,
+    planar: crate::planar::Region,
+    planar_named: bool,
     pub provenance: Vec<Provenance>,
 }
 fn measure(profile: &Profile) -> (f64, f64) {
@@ -429,6 +432,14 @@ fn reverse(boundary: &mut [Coedge]) {
 }
 impl NativeSolid {
     pub fn translated(&self, offset: [f64; 3], feature: u64) -> Result<Self> {
+        self.translated_instance(offset, feature, 0)
+    }
+    pub(crate) fn translated_instance(
+        &self,
+        offset: [f64; 3],
+        feature: u64,
+        instance: u64,
+    ) -> Result<Self> {
         let mut input = self.input.clone();
         for (v, o) in input.origin.iter_mut().zip(offset) {
             *v += o;
@@ -443,6 +454,16 @@ impl NativeSolid {
             result.append_pocket(pocket)?;
         }
         result.provenance = self.provenance.clone();
+        let axes = match self.input.plane {
+            Plane::XY => [0, 1],
+            Plane::XZ => [0, 2],
+            Plane::YZ => [1, 2],
+        };
+        result.planar = prisms::shifted(&self.planar, axes.map(|i| offset[i]));
+        prisms::instance(&mut result.planar, feature, instance);
+        if self.planar_named {
+            result.name_planar_topology()?;
+        }
         result.provenance.push(Provenance {
             feature,
             operation: Operation::NewBody,
@@ -452,6 +473,12 @@ impl NativeSolid {
     }
     pub fn topology(&self) -> &Brep {
         &self.topology
+    }
+    pub fn planar_region(&self) -> &crate::planar::Region {
+        &self.planar
+    }
+    pub fn output_signature(&self) -> Option<Vec<Vec<crate::planar::SpanKey>>> {
+        self.planar_named.then(|| self.planar.key())
     }
     fn last_feature(&self) -> u64 {
         self.provenance
@@ -726,11 +753,23 @@ impl NativeSolid {
         }
         brep.validate()?;
         let feature = input.feature_id;
+        let ids: Vec<_> = (0..=input.holes.len())
+            .map(|i| input.loop_ids.get(i).copied().unwrap_or(i as u64 + 1))
+            .collect();
+        let planar = crate::planar::Region::from_profiles(
+            &input.outer,
+            &input.holes,
+            feature,
+            input.region_id,
+            &ids,
+        )?;
         Ok(Self {
             input,
             body_id: 0,
             topology: brep,
             pockets: vec![],
+            planar,
+            planar_named: false,
             provenance: vec![Provenance {
                 feature,
                 operation: Operation::NewBody,
@@ -893,7 +932,20 @@ impl NativeSolid {
                 }
             }
         }
+        let mut edge_base = 0;
+        let mut face_base = 2;
         for (li, points) in loops.iter().enumerate() {
+            let n = if matches!(
+                std::iter::once(&self.input.outer)
+                    .chain(&self.input.holes)
+                    .nth(li)
+                    .unwrap(),
+                Profile::Circle { .. }
+            ) {
+                1
+            } else {
+                self.planar.loops().nth(li).unwrap().spans.len()
+            };
             for i in 0..points.len() {
                 let a = world(points[i], false);
                 let b = world(points[(i + 1) % points.len()], false);
@@ -903,41 +955,23 @@ impl NativeSolid {
                 let norm = cross3(delta, normal);
                 let len = dot(norm, norm).sqrt();
                 let norm = norm.map(|v| v / len * if li > 0 { -1. } else { 1. });
-                let local = self
-                    .input
-                    .loop_ids
-                    .get(li)
-                    .copied()
-                    .unwrap_or(li as u64 + 1)
-                    * 10_000;
-                let ordinal = ordinals[li][i] as u64;
-                let face = TopologyId {
-                    body: self.body_id,
-                    feature: self.input.feature_id,
-                    region: self.input.region_id,
-                    local: local + 4000 + ordinal,
-                };
+                let ordinal = ordinals[li][i];
+                let face = self.topology.faces[face_base + ordinal].id;
                 triangle(&mut mesh, [a, b, c], norm, face);
                 triangle(&mut mesh, [a, c, d], norm, face);
                 mesh.edges.extend([a, b, d, c]);
                 mesh.edge_ids.extend([
-                    TopologyId {
-                        local: local + 1000 + ordinal,
-                        ..face
-                    },
-                    TopologyId {
-                        local: local + 2000 + ordinal,
-                        ..face
-                    },
+                    self.topology.edges[edge_base + ordinal].id,
+                    self.topology.edges[edge_base + n + ordinal].id,
                 ]);
                 if corners[li][i] {
                     mesh.edges.extend([a, d]);
-                    mesh.edge_ids.push(TopologyId {
-                        local: local + 3000 + ordinal,
-                        ..face
-                    });
+                    mesh.edge_ids
+                        .push(self.topology.edges[edge_base + 2 * n + ordinal].id);
                 }
             }
+            edge_base += 3 * n;
+            face_base += n;
         }
         Ok(mesh)
     }
@@ -1004,7 +1038,9 @@ pub fn boolean(
     let bb = b.bounds();
     let disjoint = (0..3)
         .any(|i| aa[1][i] < bb[0][i] - POLICY.linear_mm || bb[1][i] < aa[0][i] - POLICY.linear_mm);
-    let mut result = if same {
+    let mut result = if let Some(solids) = prisms::boolean(a, b, operation, feature)? {
+        solids
+    } else if same {
         match operation {
             Operation::Cut => vec![],
             Operation::Join | Operation::Intersect => vec![a.clone()],
