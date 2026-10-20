@@ -1,8 +1,10 @@
 # Fusion investigation and reconstruction index
 
-Started: 2026-10-18. Updated: 2026-10-19. Target: Autodesk Fusion, previously called Fusion 360. User-selected first scope: sketching and solid modeling, within a broader full-product parity goal.
+Started: 2026-10-18. Updated: 2026-10-20. Target: Autodesk Fusion, previously called Fusion 360. User-selected first scope: sketching and solid modeling, within a broader full-product parity goal.
 
 ## Current status: installed Fusion and native Rust reconstruction
+
+[Exact curved-region Rust extrusion](curved-engine-2026-10-20.md) implements analytic line/arc loops, virtual line/arc and arc/arc arrangements, trimmed cylindrical B-rep extrusion, stable source provenance and complete extrusion boundary dependencies. Version-5 saves retain versions 1–4 readability. OCCT remains the default; independent analytic, topology, replay and test-only OCCT/STEP checks are recorded separately from Fusion parity. UI development and runtime automation remain deferred.
 
 [Analytic sketch arcs](sketch-arcs-2026-10-19.md) adds genuine bounded circular entities, radius/relational constraints, finite tangency checks and usable native three-point creation with retained valid preview. All 64 workspace tests pass; a fresh 1920×1080 native arc capture was inspected. Arc-bounded solid regions remain explicitly unavailable. The click order follows published Autodesk documentation; selected-build runtime matching remains blocked.
 

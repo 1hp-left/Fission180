@@ -61,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 operation: Operation::NewBody,
                 body_id: 3 + i as u64 * 2,
                 result_body_ids: vec![],
+                boundary_dependencies: None,
                 options: Default::default(),
             });
         }

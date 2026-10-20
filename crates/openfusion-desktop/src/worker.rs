@@ -189,10 +189,12 @@ impl Worker {
 mod tests {
     use super::*;
     fn document() -> Document {
-        Document::from_json(include_str!(
+        let d = Document::from_json(include_str!(
             "../../../examples/fusion-reference-extrude.ofrust"
         ))
-        .unwrap()
+        .unwrap();
+        // Compare accepted documents, including materialized region dependencies.
+        Model::prepare(&d).unwrap().0
     }
     #[test]
     fn rejected_open_preserves_path_dirty_history_geometry_and_file() {

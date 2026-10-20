@@ -32,6 +32,14 @@ pub enum Curve {
         normal: [f64; 3],
         radius: f64,
     },
+    Arc {
+        center: [f64; 3],
+        normal: [f64; 3],
+        x_axis: [f64; 3],
+        radius: f64,
+        start_angle: f64,
+        sweep: f64,
+    },
 }
 #[derive(Debug, Clone)]
 pub enum Surface {
@@ -54,6 +62,7 @@ pub struct Edge {
     pub id: TopologyId,
     pub vertices: [usize; 2],
     pub curve: Curve,
+    pub source_entity: Option<u64>,
 }
 #[derive(Debug, Clone)]
 pub struct Coedge {
@@ -66,6 +75,7 @@ pub struct Face {
     pub surface: Surface,
     pub loops: Vec<Vec<Coedge>>,
     pub reversed: bool,
+    pub source_entity: Option<u64>,
 }
 #[derive(Debug, Clone)]
 pub struct Brep {
@@ -99,6 +109,40 @@ impl Brep {
                 return invalid("Rust B-rep has invalid edge identity/endpoints");
             }
             let [a, b] = edge.vertices.map(|i| self.vertices[i].point);
+            if let Curve::Arc {
+                center,
+                normal,
+                x_axis,
+                radius,
+                start_angle,
+                sweep,
+            } = edge.curve
+            {
+                if center
+                    .into_iter()
+                    .chain(normal)
+                    .chain(x_axis)
+                    .chain([radius, start_angle, sweep])
+                    .any(|v| !v.is_finite())
+                    || radius <= POLICY.linear_mm
+                    || sweep.abs() * radius <= POLICY.linear_mm
+                    || sweep.abs() >= std::f64::consts::TAU
+                    || (dot(normal, normal) - 1.).abs() > POLICY.angular_rad
+                    || (dot(x_axis, x_axis) - 1.).abs() > POLICY.angular_rad
+                    || dot(normal, x_axis).abs() > POLICY.angular_rad
+                {
+                    return invalid("Rust B-rep has invalid bounded arc geometry");
+                }
+                let y = cross3(normal, x_axis);
+                for (p, t) in [(a, start_angle), (b, start_angle + sweep)] {
+                    let q = std::array::from_fn(|i| {
+                        center[i] + radius * (x_axis[i] * t.cos() + y[i] * t.sin())
+                    });
+                    if dist(p, q) > POLICY.linear_mm {
+                        return invalid("Rust bounded arc parameters do not match endpoints");
+                    }
+                }
+            }
             match edge.curve {
                 Curve::Line if dist(a, b) <= POLICY.linear_mm => {
                     return invalid("Rust B-rep has a degenerate line");
@@ -108,7 +152,8 @@ impl Brep {
                     normal,
                     radius,
                 } => {
-                    if !radius.is_finite()
+                    if center.into_iter().chain(normal).any(|v| !v.is_finite())
+                        || !radius.is_finite()
                         || radius <= POLICY.linear_mm
                         || (dot(normal, normal) - 1.).abs() > POLICY.angular_rad
                     {
@@ -134,7 +179,7 @@ impl Brep {
             }
             match face.surface {
                 Surface::Plane { origin, normal } => {
-                    if origin.iter().any(|v| !v.is_finite())
+                    if origin.iter().chain(&normal).any(|v| !v.is_finite())
                         || (dot(normal, normal) - 1.).abs() > POLICY.angular_rad
                     {
                         return invalid("Rust plane is invalid");
@@ -145,7 +190,7 @@ impl Brep {
                     axis,
                     radius,
                 } => {
-                    if origin.iter().any(|v| !v.is_finite())
+                    if origin.iter().chain(&axis).any(|v| !v.is_finite())
                         || !radius.is_finite()
                         || radius <= POLICY.linear_mm
                         || (dot(axis, axis) - 1.).abs() > POLICY.angular_rad
@@ -154,7 +199,7 @@ impl Brep {
                     }
                 }
             }
-            for boundary in &face.loops {
+            for (loop_index, boundary) in face.loops.iter().enumerate() {
                 if boundary.is_empty() {
                     return invalid("Rust B-rep has an empty loop");
                 }
@@ -182,7 +227,8 @@ impl Brep {
                                 .abs()
                                     <= POLICY.linear_mm
                             }) && match edge.curve {
-                                Curve::Circle { normal: axis, .. } => {
+                                Curve::Circle { normal: axis, .. }
+                                | Curve::Arc { normal: axis, .. } => {
                                     dot(axis, normal).abs() > 1. - POLICY.angular_rad
                                 }
                                 _ => true,
@@ -197,6 +243,12 @@ impl Brep {
                                 radius: r,
                                 normal,
                                 center,
+                            }
+                            | Curve::Arc {
+                                radius: r,
+                                normal,
+                                center,
+                                ..
                             } = edge.curve
                             {
                                 (r - radius).abs() <= POLICY.linear_mm
@@ -208,14 +260,19 @@ impl Brep {
                                             <= POLICY.linear_mm * POLICY.linear_mm
                                     }
                             } else {
-                                v.iter().all(|j| {
-                                    let delta = std::array::from_fn(|i| {
-                                        self.vertices[*j].point[i] - origin[i]
-                                    });
-                                    let z = dot(delta, axis);
-                                    (dot(delta, delta) - z * z - radius * radius).abs()
-                                        <= POLICY.linear_mm * (1. + radius * radius)
-                                })
+                                let delta = std::array::from_fn(|i| {
+                                    self.vertices[v[1]].point[i] - self.vertices[v[0]].point[i]
+                                });
+                                let z = dot(delta, axis);
+                                dist(delta, axis.map(|x| x * z)) <= POLICY.linear_mm
+                                    && v.iter().all(|j| {
+                                        let delta = std::array::from_fn(|i| {
+                                            self.vertices[*j].point[i] - origin[i]
+                                        });
+                                        let z = dot(delta, axis);
+                                        (dot(delta, delta) - z * z - radius * radius).abs()
+                                            <= POLICY.linear_mm * (1. + radius * radius)
+                                    })
                             }
                         }
                     };
@@ -228,10 +285,91 @@ impl Brep {
                         return invalid("Rust B-rep loop is not closed");
                     }
                 }
+                if let Surface::Plane { normal, .. } = face.surface {
+                    let anchor = self.vertices[ends[0][0]].point;
+                    let mut area = [0.; 3];
+                    for co in boundary {
+                        let edge = &self.edges[co.edge];
+                        let a = self.vertices[edge.vertices[0]].point;
+                        let b = self.vertices[edge.vertices[1]].point;
+                        let chord = cross3(
+                            std::array::from_fn(|i| a[i] - anchor[i]),
+                            std::array::from_fn(|i| b[i] - anchor[i]),
+                        );
+                        let (axis, segment) = match edge.curve {
+                            Curve::Line => ([0.; 3], 0.),
+                            Curve::Circle { normal, radius, .. } => {
+                                (normal, std::f64::consts::PI * radius * radius)
+                            }
+                            Curve::Arc {
+                                normal,
+                                radius,
+                                sweep,
+                                ..
+                            } => (normal, 0.5 * radius * radius * (sweep - sweep.sin())),
+                        };
+                        for i in 0..3 {
+                            area[i] += (0.5 * chord[i] + axis[i] * segment)
+                                * if co.reversed { -1. } else { 1. };
+                        }
+                    }
+                    let signed = dot(area, normal) * if face.reversed { -1. } else { 1. };
+                    if signed * if loop_index == 0 { 1. } else { -1. } <= POLICY.linear_mm.powi(2) {
+                        return invalid(
+                            "Rust planar loop orientation disagrees with face orientation",
+                        );
+                    }
+                }
             }
         }
         if uses.iter().any(|u| *u != (1, 1)) {
             return invalid("Rust B-rep is not an oriented two-manifold");
+        }
+        // A two-use edge count alone admits disconnected shells and vertex pinches.
+        // Validate the connected face shell and each vertex's circular link.
+        let mut edge_faces = vec![vec![]; self.edges.len()];
+        let mut links: Vec<std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>>> =
+            vec![Default::default(); self.vertices.len()];
+        for (fi, face) in self.faces.iter().enumerate() {
+            for boundary in &face.loops {
+                for i in 0..boundary.len() {
+                    let a = &boundary[i];
+                    let b = &boundary[(i + 1) % boundary.len()];
+                    edge_faces[a.edge].push(fi);
+                    let port_a = (a.edge, usize::from(!a.reversed));
+                    let port_b = (b.edge, usize::from(b.reversed));
+                    let vertex = self.edges[a.edge].vertices[port_a.1];
+                    links[vertex].entry(port_a).or_default().push(port_b);
+                    links[vertex].entry(port_b).or_default().push(port_a);
+                }
+            }
+        }
+        for link in links {
+            if link.is_empty() || link.values().any(|v| v.len() != 2) {
+                return invalid("Rust B-rep has an unused or nonmanifold vertex");
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            let mut pending = vec![*link.keys().next().unwrap()];
+            while let Some(p) = pending.pop() {
+                if seen.insert(p) {
+                    pending.extend(&link[&p]);
+                }
+            }
+            if seen.len() != link.len() {
+                return invalid("Rust B-rep has a pinched vertex link");
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending = vec![0];
+        while let Some(f) = pending.pop() {
+            if seen.insert(f) {
+                for co in self.faces[f].loops.iter().flatten() {
+                    pending.extend(&edge_faces[co.edge]);
+                }
+            }
+        }
+        if seen.len() != self.faces.len() {
+            return invalid("Rust B-rep has disconnected face shells");
         }
         Ok(())
     }
@@ -250,24 +388,7 @@ pub struct NativeSolid {
     pub provenance: Vec<Provenance>,
 }
 fn measure(profile: &Profile) -> (f64, f64) {
-    match profile {
-        Profile::Circle { radius, .. } => (
-            std::f64::consts::PI * radius * radius,
-            std::f64::consts::TAU * radius,
-        ),
-        _ => {
-            let p = profile.outline(0);
-            let mut area = 0.;
-            let mut perimeter = 0.;
-            for i in 0..p.len() {
-                let a = p[i];
-                let b = p[(i + 1) % p.len()];
-                area += a[0] * b[1] - a[1] * b[0];
-                perimeter += (a[0] - b[0]).hypot(a[1] - b[1]);
-            }
-            (area.abs() * 0.5, perimeter)
-        }
-    }
+    (profile.signed_area().abs(), profile.perimeter())
 }
 fn reverse(boundary: &mut [Coedge]) {
     boundary.reverse();
@@ -314,18 +435,29 @@ impl NativeSolid {
         if input.distance.abs() < EPS {
             return invalid("Rust extrusion distance must be nonzero");
         }
-        // Reuse the independently authored analytic containment validator, not OCCT.
-        let mut sketch = crate::Sketch {
-            next_profile_id: 1,
-            ..Default::default()
-        };
-        sketch.add_profile(input.outer.clone())?;
-        for hole in &input.holes {
-            sketch.add_profile(hole.clone())?;
+        if input
+            .holes
+            .iter()
+            .any(|h| !crate::region::strictly_contains(&input.outer, h))
+        {
+            return invalid("Rust extrusion holes must be strictly inside the outer boundary");
         }
-        let regions = sketch.regions()?;
-        if regions[0].inner.len() != input.holes.len() {
-            return invalid("Rust extrusion holes must be strictly inside and mutually disjoint");
+        for i in 0..input.holes.len() {
+            for j in i + 1..input.holes.len() {
+                let a = &input.holes[i];
+                let b = &input.holes[j];
+                if crate::region::strictly_contains(a, b)
+                    || crate::region::strictly_contains(b, a)
+                    || a.boundary().iter().any(|x| {
+                        b.boundary().iter().any(|y| {
+                            crate::boundary::intersections(x.curve, y.curve)
+                                .map_or(true, |v| !v.is_empty())
+                        })
+                    })
+                {
+                    return invalid("Rust extrusion holes must be mutually disjoint");
+                }
+            }
         }
         let normal = input.plane.normal().to_array();
         let world = |p: [f64; 2], top: bool| {
@@ -350,6 +482,7 @@ impl NativeSolid {
                     },
                     loops: vec![],
                     reversed: false,
+                    source_entity: None,
                 },
                 Face {
                     id: key(1),
@@ -359,6 +492,7 @@ impl NativeSolid {
                     },
                     loops: vec![],
                     reversed: false,
+                    source_entity: None,
                 },
             ],
         };
@@ -367,23 +501,18 @@ impl NativeSolid {
             .enumerate()
         {
             let hole = loop_index > 0;
-            let mut points = if let Profile::Circle { center, radius } = profile {
-                vec![[center[0] + radius, center[1]]]
-            } else {
-                profile.outline(0)
-            };
-            if points.len() > 1 {
-                let signed: f64 = (0..points.len())
-                    .map(|i| {
-                        let a = points[i];
-                        let b = points[(i + 1) % points.len()];
-                        a[0] * b[1] - a[1] * b[0]
-                    })
-                    .sum();
-                if signed < 0. {
-                    points.reverse();
+            let mut segments = profile.boundary();
+            if profile.signed_area() < 0. {
+                segments.reverse();
+                for s in &mut segments {
+                    s.curve = s.curve.reversed();
                 }
             }
+            let points = if let Profile::Circle { center, radius } = profile {
+                vec![[center[0] + radius, center[1]]]
+            } else {
+                segments.iter().map(|s| s.curve.point(0.)).collect()
+            };
             let n = points.len();
             let vbase = brep.vertices.len();
             let ebase = brep.edges.len();
@@ -411,10 +540,26 @@ impl NativeSolid {
                             normal,
                             radius: *radius,
                         }
+                    } else if let crate::boundary::PlanarCurve::Arc { geometry: a } =
+                        segments[i].curve
+                    {
+                        Curve::Arc {
+                            center: world(a.center, top),
+                            normal,
+                            x_axis: input.plane.point([1., 0.], [0.; 3]).to_array(),
+                            radius: a.radius,
+                            start_angle: a.start_angle,
+                            sweep: a.sweep,
+                        }
                     } else {
                         Curve::Line
                     };
                     brep.edges.push(Edge {
+                        source_entity: if matches!(profile, Profile::Circle { .. }) {
+                            None
+                        } else {
+                            segments[i].source
+                        },
                         id: key(local_base + if top { 2000 } else { 1000 } + i as u64),
                         vertices: [
                             vbase + if top { n } else { 0 } + i,
@@ -426,6 +571,11 @@ impl NativeSolid {
             }
             for i in 0..n {
                 brep.edges.push(Edge {
+                    source_entity: if matches!(profile, Profile::Circle { .. }) {
+                        None
+                    } else {
+                        segments[i].source
+                    },
                     id: key(local_base + 3000 + i as u64),
                     vertices: [vbase + i, vbase + n + i],
                     curve: Curve::Line,
@@ -472,11 +622,19 @@ impl NativeSolid {
                 if hole {
                     reverse(&mut boundary);
                 }
-                let surface = if let Profile::Circle { center, radius } = profile {
+                let arc = if let Profile::Circle { center, radius } = profile {
+                    Some((*center, *radius, false))
+                } else if let crate::boundary::PlanarCurve::Arc { geometry: a } = segments[i].curve
+                {
+                    Some((a.center, a.radius, a.sweep < 0.))
+                } else {
+                    None
+                };
+                let surface = if let Some((center, radius, _)) = arc {
                     Surface::Cylinder {
-                        origin: world(*center, false),
+                        origin: world(center, false),
                         axis: normal,
-                        radius: *radius,
+                        radius,
                     }
                 } else {
                     let a = world(points[i], false);
@@ -489,19 +647,28 @@ impl NativeSolid {
                     }
                 };
                 brep.faces.push(Face {
+                    source_entity: if matches!(profile, Profile::Circle { .. }) {
+                        None
+                    } else {
+                        segments[i].source
+                    },
                     id: key(local_base + 4000 + i as u64),
                     surface,
                     loops: vec![boundary],
-                    reversed: hole,
+                    reversed: hole ^ arc.is_some_and(|(_, _, reverse)| reverse),
                 });
             }
         }
         if input.distance < 0. {
-            for face in &mut brep.faces {
+            for (index, face) in brep.faces.iter_mut().enumerate() {
                 for boundary in &mut face.loops {
                     reverse(boundary);
                 }
-                face.reversed = !face.reversed;
+                // Cap outward normals swap with extrusion direction. Side
+                // radial/planar outward normals do not.
+                if index < 2 {
+                    face.reversed = !face.reversed;
+                }
             }
         }
         brep.validate()?;
@@ -528,13 +695,13 @@ impl NativeSolid {
         2. * (a - holes_area) + (p + holes_perimeter) * self.input.distance.abs()
     }
     pub fn bounds(&self) -> [[f64; 3]; 2] {
-        let points = match self.input.outer {
-            Profile::Circle { center, radius } => vec![
-                [center[0] - radius, center[1] - radius],
-                [center[0] + radius, center[1] + radius],
-            ],
-            _ => self.input.outer.outline(0),
-        };
+        let bounds2 = self.input.outer.planar_bounds();
+        let points = [
+            bounds2[0],
+            [bounds2[0][0], bounds2[1][1]],
+            bounds2[1],
+            [bounds2[1][0], bounds2[0][1]],
+        ];
         let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
         for p in points {
             for t in [0., self.input.distance] {
@@ -553,20 +720,43 @@ impl NativeSolid {
             return invalid("Rust display tessellation requires 8..4096 segments");
         }
         self.topology.validate()?;
+        let mut ordinals = vec![];
+        let mut corners = vec![];
         let loops: Vec<_> = std::iter::once(&self.input.outer)
             .chain(self.input.holes.iter())
             .map(|p| {
-                let mut points = p.outline(segments);
-                let signed: f64 = (0..points.len())
-                    .map(|i| {
-                        let a = points[i];
-                        let b = points[(i + 1) % points.len()];
-                        a[0] * b[1] - a[1] * b[0]
-                    })
-                    .sum();
-                if signed < 0. {
-                    points.reverse();
+                if matches!(p, Profile::Circle { .. }) {
+                    ordinals.push(vec![0; segments]);
+                    corners.push(vec![false; segments]);
+                    return p.outline(segments);
                 }
+                let mut boundary = p.boundary();
+                if p.signed_area() < 0. {
+                    boundary.reverse();
+                    for s in &mut boundary {
+                        s.curve = s.curve.reversed();
+                    }
+                }
+                let mut points = vec![];
+                let mut ids = vec![];
+                let mut corner = vec![];
+                for (i, s) in boundary.iter().enumerate() {
+                    let count = match s.curve {
+                        crate::boundary::PlanarCurve::Line { .. } => 1,
+                        crate::boundary::PlanarCurve::Arc { geometry: a } => {
+                            ((segments as f64 * a.sweep.abs() / std::f64::consts::TAU).ceil()
+                                as usize)
+                                .max(1)
+                        }
+                    };
+                    for j in 0..count {
+                        points.push(s.curve.point(j as f64 / count as f64));
+                        ids.push(i);
+                        corner.push(j == 0);
+                    }
+                }
+                ordinals.push(ids);
+                corners.push(corner);
                 points
             })
             .collect();
@@ -632,10 +822,6 @@ impl NativeSolid {
             }
         }
         for (li, points) in loops.iter().enumerate() {
-            let profile = std::iter::once(&self.input.outer)
-                .chain(self.input.holes.iter())
-                .nth(li)
-                .unwrap();
             for i in 0..points.len() {
                 let a = world(points[i], false);
                 let b = world(points[(i + 1) % points.len()], false);
@@ -652,11 +838,7 @@ impl NativeSolid {
                     .copied()
                     .unwrap_or(li as u64 + 1)
                     * 10_000;
-                let ordinal = if matches!(profile, Profile::Circle { .. }) {
-                    0
-                } else {
-                    i as u64
-                };
+                let ordinal = ordinals[li][i] as u64;
                 let face = TopologyId {
                     body: self.body_id,
                     feature: self.input.feature_id,
@@ -676,7 +858,7 @@ impl NativeSolid {
                         ..face
                     },
                 ]);
-                if !matches!(profile, Profile::Circle { .. }) {
+                if corners[li][i] {
                     mesh.edges.extend([a, d]);
                     mesh.edge_ids.push(TopologyId {
                         local: local + 3000 + i as u64,

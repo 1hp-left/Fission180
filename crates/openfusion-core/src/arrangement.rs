@@ -1,24 +1,31 @@
-//! Independent planar line arrangement. Intersections split analysis edges, never
-//! the user's entities or constraints. Boundary identities use source entity cycles.
+//! Independent exact planar line/arc arrangement. Virtual spans retain source entities.
 use crate::{
-    EPS, Profile, Result, Sketch, invalid,
+    EPS, Profile, Result, Sketch,
+    boundary::{BoundarySegment, PlanarCurve, distance, intersections},
+    invalid,
     sketch::{Entity, SketchGraph},
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A directed source span and its two boundary junctions. Branch is the ordinal
+/// finite intersection along the lower entity ID, never a coordinate or mesh index.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryUse {
+    pub entity: u64,
+    pub previous: u64,
+    pub next: u64,
+    pub start_branch: u8,
+    pub end_branch: u8,
+    pub forward: bool,
+}
 #[derive(Debug)]
 pub(crate) struct Cell {
     pub cycle: Vec<u64>,
     pub points: Vec<[f64; 2]>,
-}
-fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0] * b[1] - a[1] * b[0]
-}
-fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
-    [a[0] - b[0], a[1] - b[1]]
-}
-fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
+    pub profile: Profile,
+    pub key: Vec<BoundaryUse>,
 }
 pub(crate) fn canonical_cycle(ids: &[u64]) -> Vec<u64> {
     (0..ids.len())
@@ -35,92 +42,116 @@ pub(crate) fn canonical_cycle(ids: &[u64]) -> Vec<u64> {
         .min()
         .unwrap_or_default()
 }
+pub(crate) fn canonical_boundary(key: &[BoundaryUse]) -> Vec<BoundaryUse> {
+    (0..key.len())
+        .map(|i| {
+            (0..key.len())
+                .map(|j| key[(i + j) % key.len()].clone())
+                .collect::<Vec<_>>()
+        })
+        .min()
+        .unwrap_or_default()
+}
 impl SketchGraph {
     pub(crate) fn line_cells(&self) -> Result<Vec<Cell>> {
-        let mut lines = vec![];
+        let mut curves = vec![];
         for (id, e) in &self.entities {
             if self.construction.contains(id) {
                 continue;
             }
-            if let Entity::Line { a, b } = e {
-                let a = self.points[a];
-                let b = self.points[b];
-                if distance(a, b) < EPS {
-                    return invalid("Degenerate line in sketch arrangement");
+            let curve = match e {
+                Entity::Line { a, b } => PlanarCurve::Line {
+                    start: self.points[a],
+                    end: self.points[b],
+                },
+                Entity::Arc { .. } => PlanarCurve::Arc {
+                    geometry: self.arc_geometry(*id)?,
+                },
+                Entity::Circle { .. } => continue,
+            };
+            curve.validate()?;
+            curves.push((*id, curve));
+        }
+        if curves.len() > 2000 {
+            return invalid("Arrangement exceeds 2000 entities");
+        }
+        // Full circles retain their legacy primitive identities. Until their
+        // seam-free arrangement is implemented, never ignore a crossing source.
+        for (id, entity) in &self.entities {
+            if self.construction.contains(id) {
+                continue;
+            }
+            if let Entity::Circle { center, radius } = entity {
+                let boundary = Profile::Circle {
+                    center: self.points[center],
+                    radius: *radius,
                 }
-                lines.push((*id, a, b));
+                .boundary();
+                for (_, curve) in &curves {
+                    if boundary.iter().any(|s| {
+                        intersections(s.curve, *curve).map_or(true, |hits| !hits.is_empty())
+                    }) {
+                        return invalid(
+                            "Full-circle intersections with line/arc arrangements are unsupported; no boundary was ignored",
+                        );
+                    }
+                }
             }
         }
-        if lines.len() > 2000 {
-            return invalid("Line arrangement exceeds 2000 entities");
-        }
-        let mut cuts = vec![vec![0., 1.]; lines.len()];
-        for i in 0..lines.len() {
-            for j in i + 1..lines.len() {
-                let (_, a, b) = lines[i];
-                let (_, c, d) = lines[j];
-                let ab = sub(b, a);
-                let cd = sub(d, c);
-                let ac = sub(c, a);
-                let la = distance(a, b);
-                let lb = distance(c, d);
-                let denom = cross(ab, cd);
-                if denom.abs() <= 1e-12 * la * lb {
-                    if cross(ab, ac).abs() / la <= EPS {
-                        let axis = usize::from(ab[1].abs() > ab[0].abs());
-                        let (t, u) = (
-                            (c[axis] - a[axis]) / ab[axis],
-                            (d[axis] - a[axis]) / ab[axis],
-                        );
-                        if t.max(u).min(1.) - t.min(u).max(0.) > EPS / la {
-                            return invalid(
-                                "Overlapping collinear sketch lines are ambiguous; remove the duplicate segment",
-                            );
-                        }
-                    }
-                    continue;
-                }
-                let t = cross(ac, cd) / denom;
-                let u = cross(ac, ab) / denom;
-                if t >= -EPS / la && t <= 1. + EPS / la && u >= -EPS / lb && u <= 1. + EPS / lb {
-                    cuts[i].push(t.clamp(0., 1.));
-                    cuts[j].push(u.clamp(0., 1.));
+        let mut cuts = vec![vec![(0., None), (1., None)]; curves.len()];
+        // Pair/branch records remain associated with the same analytic intersection
+        // even when several source entities meet at one arrangement vertex.
+        let mut events = vec![];
+        for i in 0..curves.len() {
+            for j in i + 1..curves.len() {
+                let hits = intersections(curves[i].1, curves[j].1)?;
+                for (branch, (t, u)) in hits.into_iter().enumerate() {
+                    let event = events.len();
+                    events.push(((curves[i].0, curves[j].0), branch as u8));
+                    cuts[i].push((t, Some(event)));
+                    cuts[j].push((u, Some(event)));
                 }
             }
         }
         let mut vertices: Vec<[f64; 2]> = vec![];
+        let mut marks: Vec<BTreeMap<(u64, u64), u8>> = vec![];
         let mut edges = vec![];
-        for ((id, a, b), mut split) in lines.into_iter().zip(cuts) {
-            split.sort_by(f64::total_cmp);
-            let len = distance(a, b);
-            split.dedup_by(|a, b| (*a - *b).abs() * len < EPS);
-            let mut nodes = vec![];
-            for t in split {
-                let p = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+        for ((id, curve), mut split) in curves.into_iter().zip(cuts) {
+            split.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut nodes: Vec<(f64, usize)> = vec![];
+            for (t, event) in split {
+                let p = curve.point(t);
                 let node = if let Some(i) = vertices.iter().position(|q| distance(*q, p) < EPS) {
                     i
                 } else {
                     vertices.push(p);
+                    marks.push(BTreeMap::new());
                     vertices.len() - 1
                 };
-                nodes.push(node);
+                if let Some(e) = event {
+                    marks[node].insert(events[e].0, events[e].1);
+                }
+                if nodes.last().is_none_or(|(_, v)| *v != node) {
+                    nodes.push((t, node));
+                }
             }
             for w in nodes.windows(2) {
-                if w[0] != w[1] {
-                    edges.push((w[0], w[1], id));
+                if w[0].1 != w[1].1 {
+                    edges.push((w[0].1, w[1].1, id, curve.portion(w[0].0, w[1].0)));
                 }
             }
         }
         if edges.len() > 100_000 {
-            return invalid("Line arrangement exceeds intersection limit");
+            return invalid("Arrangement exceeds intersection limit");
+        }
+        if vertices.len() > 8192 {
+            return invalid("Arrangement exceeds the supported vertex traversal limit");
         }
         let mut adjacent = vec![vec![]; vertices.len()];
-        for (i, (a, b, _)) in edges.iter().enumerate() {
+        for (i, (a, b, _, _)) in edges.iter().enumerate() {
             adjacent[*a].push((i, *b));
             adjacent[*b].push((i, *a));
         }
-        // Remove bridges, including bridges between closed components. They do
-        // not bound a region and must not produce self-touching face walks.
         fn bridges(
             v: usize,
             parent: usize,
@@ -165,17 +196,39 @@ impl SketchGraph {
                 );
             }
         }
+        let tangent = |edge: usize, v: usize| {
+            let (a, _, _, curve) = edges[edge];
+            if a == v {
+                curve.tangent(0.)
+            } else {
+                curve.reversed().tangent(0.)
+            }
+        };
         for (v, list) in adjacent.iter_mut().enumerate() {
             list.retain(|(edge, _)| !removed.contains(edge));
-            list.sort_by(|(_, a), (_, b)| {
-                let a = sub(vertices[*a], vertices[v]);
-                let b = sub(vertices[*b], vertices[v]);
+            list.sort_by(|(a, _), (b, _)| {
+                let a = tangent(*a, v);
+                let b = tangent(*b, v);
                 a[1].atan2(a[0]).total_cmp(&b[1].atan2(b[0]))
             });
+            if list.len() > 2 {
+                for i in 0..list.len() {
+                    let a = tangent(list[i].0, v);
+                    let b = tangent(list[(i + 1) % list.len()].0, v);
+                    if crate::boundary::cross(a, b).abs()
+                        < 1e-10 * a[0].hypot(a[1]) * b[0].hypot(b[1])
+                        && a[0] * b[0] + a[1] * b[1] > 0.
+                    {
+                        return invalid(
+                            "Tangent junction with multiple region branches is ambiguous",
+                        );
+                    }
+                }
+            }
         }
         let mut visited = BTreeSet::new();
         let mut cells = vec![];
-        for (first, (a, b, _)) in edges.iter().enumerate() {
+        for (first, (a, b, _, _)) in edges.iter().enumerate() {
             if removed.contains(&first) {
                 continue;
             }
@@ -189,9 +242,17 @@ impl SketchGraph {
                 let mut w = to;
                 loop {
                     if !visited.insert((edge, v)) {
-                        break;
+                        return invalid("Arrangement face walk did not close");
                     }
-                    walk.push((edges[edge].2, vertices[v]));
+                    let (_, _, id, curve) = edges[edge];
+                    let forward = edges[edge].0 == v;
+                    walk.push((
+                        id,
+                        v,
+                        w,
+                        if forward { curve } else { curve.reversed() },
+                        forward,
+                    ));
                     let list = &adjacent[w];
                     let index = list.iter().position(|(e, _)| *e == edge).unwrap();
                     let (next, next_to) = list[(index + list.len() - 1) % list.len()];
@@ -202,49 +263,99 @@ impl SketchGraph {
                         break;
                     }
                 }
-                let area: f64 = (0..walk.len())
-                    .map(|i| {
-                        cross(
-                            sub(walk[i].1, walk[0].1),
-                            sub(walk[(i + 1) % walk.len()].1, walk[0].1),
-                        )
-                    })
-                    .sum();
+                let anchor = vertices[from];
+                let area: f64 = walk.iter().map(|x| x.3.area_term(anchor)).sum();
                 if area <= EPS * EPS {
                     continue;
                 }
-                // Consecutive analysis spans on one original line are one
-                // boundary use. Attaching a dangling T does not change identity.
-                let mut compact = vec![];
-                for i in 0..walk.len() {
-                    if walk[i].0 != walk[(i + walk.len() - 1) % walk.len()].0 {
-                        compact.push(walk[i]);
+                let Some(offset) = (0..walk.len())
+                    .find(|i| walk[*i].0 != walk[(*i + walk.len() - 1) % walk.len()].0)
+                else {
+                    return invalid("Single-entity closed bounded arc is invalid");
+                };
+                walk.rotate_left(offset);
+                let mut compact: Vec<(u64, usize, usize, PlanarCurve, bool)> = vec![];
+                for span in walk {
+                    if let Some(last) = compact.last_mut().filter(|last| last.0 == span.0) {
+                        last.2 = span.2;
+                        last.3 = match (last.3, span.3) {
+                            (PlanarCurve::Line { start, .. }, PlanarCurve::Line { end, .. }) => {
+                                PlanarCurve::Line { start, end }
+                            }
+                            (
+                                PlanarCurve::Arc { geometry: mut a },
+                                PlanarCurve::Arc { geometry: b },
+                            ) => {
+                                a.sweep += b.sweep;
+                                PlanarCurve::Arc { geometry: a }
+                            }
+                            _ => return invalid("Boundary source changed curve type"),
+                        };
+                    } else {
+                        compact.push(span);
                     }
                 }
-                if compact.len() < 3 {
-                    continue;
+                let mut key = vec![];
+                let mut segments = vec![];
+                for i in 0..compact.len() {
+                    let (id, v, w, curve, forward) = compact[i];
+                    let previous = compact[(i + compact.len() - 1) % compact.len()].0;
+                    let next = compact[(i + 1) % compact.len()].0;
+                    let branch = |node: usize, other: u64| -> Result<u8> {
+                        marks[node]
+                            .get(&(id.min(other), id.max(other)))
+                            .copied()
+                            .ok_or_else(|| {
+                                crate::Error::Invalid("Missing analytic junction provenance".into())
+                            })
+                    };
+                    key.push(BoundaryUse {
+                        entity: id,
+                        previous,
+                        next,
+                        start_branch: branch(v, previous)?,
+                        end_branch: branch(w, next)?,
+                        forward,
+                    });
+                    segments.push(BoundarySegment {
+                        source: Some(id),
+                        curve,
+                    });
                 }
-                let ids: Vec<_> = compact.iter().map(|x| x.0).collect();
-                let cycle = canonical_cycle(&ids);
-                // Keep CCW geometry, but rotate it deterministically.
-                let offset = (0..ids.len())
-                    .min_by_key(|i| {
-                        (0..ids.len())
-                            .map(|j| ids[(i + j) % ids.len()])
-                            .collect::<Vec<_>>()
-                    })
+                let canonical = canonical_boundary(&key);
+                // Align boundary geometry to the same persistent directed source order.
+                let start = (0..compact.len())
+                    .find(|i| (0..key.len()).all(|j| key[(*i + j) % key.len()] == canonical[j]))
                     .unwrap();
-                compact.rotate_left(offset);
-                let points: Vec<_> = compact.into_iter().map(|x| x.1).collect();
-                Profile::Polygon {
-                    points: points.clone(),
-                }
-                .validate()?;
-                cells.push(Cell { cycle, points });
+                segments.rotate_left(start);
+                compact.rotate_left(start);
+                let key = canonical;
+                let ids: Vec<_> = compact.iter().map(|x| x.0).collect();
+                let points: Vec<_> = segments.iter().map(|s| s.curve.point(0.)).collect();
+                let curved = segments
+                    .iter()
+                    .any(|s| matches!(s.curve, PlanarCurve::Arc { .. }));
+                let profile = if curved {
+                    Profile::Curved { segments }
+                } else {
+                    Profile::Polygon {
+                        points: points.clone(),
+                    }
+                };
+                profile.validate()?;
+                cells.push(Cell {
+                    cycle: canonical_cycle(&ids),
+                    points,
+                    profile,
+                    key: if curved { key } else { vec![] },
+                });
             }
         }
-        cells.sort_by(|a, b| a.cycle.cmp(&b.cycle));
-        if cells.windows(2).any(|c| c[0].cycle == c[1].cycle) {
+        cells.sort_by(|a, b| a.cycle.cmp(&b.cycle).then(a.key.cmp(&b.key)));
+        if cells
+            .windows(2)
+            .any(|c| c[0].cycle == c[1].cycle && c[0].key == c[1].key)
+        {
             return invalid("Ambiguous sketch boundary provenance");
         }
         Ok(cells)
@@ -265,6 +376,23 @@ impl Sketch {
             }
         }
         let cells = graph.line_cells()?;
+        // Bind a newly supplied analytic loop once. Subsequent discovery uses
+        // the full directed junction key, including intersection branch.
+        for (id, p) in self.profile_ids.iter().zip(&self.profiles) {
+            if matches!(p, Profile::Curved { .. }) && !graph.curve_regions.contains_key(id) {
+                if let Some(entities) = graph.profile_entities.get(id) {
+                    let cycle = canonical_cycle(entities);
+                    let matching: Vec<_> = cells
+                        .iter()
+                        .filter(|c| c.cycle == cycle && !c.key.is_empty())
+                        .collect();
+                    if matching.len() != 1 {
+                        return invalid("Supplied curved loop has ambiguous source provenance");
+                    }
+                    graph.curve_regions.insert(*id, matching[0].key.clone());
+                }
+            }
+        }
         let mut registry = BTreeMap::new();
         for (id, cycle) in &graph.region_cycles {
             if registry.insert(cycle.clone(), *id).is_some() {
@@ -283,20 +411,34 @@ impl Sketch {
                 // Keep whole primitive construction loops editable as primitives.
                 // A partition with virtual intersections is rebuilt when active.
                 if let Ok(p) = graph.primitive_profile(*id, p) {
-                    p.validate()?;
-                    profiles.insert(*id, p);
+                    if p.validate().is_ok() {
+                        profiles.insert(*id, p);
+                    }
                 }
             }
         }
         for cell in cells {
-            let id = if let Some(id) = registry.get(&cell.cycle) {
-                *id
+            let existing = if cell.key.is_empty() {
+                registry.get(&cell.cycle).copied()
+            } else {
+                graph
+                    .curve_regions
+                    .iter()
+                    .find(|(_, k)| **k == cell.key)
+                    .map(|(id, _)| *id)
+            };
+            let id = if let Some(id) = existing {
+                id
             } else {
                 let id = candidate.next_profile_id;
                 candidate.next_profile_id = id
                     .checked_add(1)
                     .ok_or_else(|| crate::Error::Invalid("Sketch profile IDs exhausted".into()))?;
-                graph.region_cycles.insert(id, cell.cycle.clone());
+                if cell.key.is_empty() {
+                    graph.region_cycles.insert(id, cell.cycle.clone());
+                } else {
+                    graph.curve_regions.insert(id, cell.key.clone());
+                }
                 graph.profile_entities.insert(id, cell.cycle.clone());
                 id
             };
@@ -305,7 +447,9 @@ impl Sketch {
                 .iter()
                 .position(|i| *i == id)
                 .map(|i| &self.profiles[i]);
-            let profile = if let Some(p @ Profile::Rectangle { .. }) = original {
+            let profile = if !cell.key.is_empty() {
+                cell.profile
+            } else if let Some(p @ Profile::Rectangle { .. }) = original {
                 graph.primitive_profile(id, p)?
             } else {
                 Profile::Polygon {

@@ -1,6 +1,5 @@
-//! Stable regions for disjoint or strictly nested analytic loops.
-//! Intersecting/touching arrangements are rejected until an arrangement solver exists.
-use crate::{EPS, Profile, Result, Sketch, invalid};
+//! Stable analytic regions with exact nesting and certified arrangement adjacency.
+use crate::{Profile, Result, Sketch, invalid};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Region {
     pub id: u64,
@@ -14,154 +13,26 @@ enum Relation {
     Disjoint,
     Ambiguous,
 }
-fn rectangle(p: &Profile) -> Option<([f64; 2], [f64; 2])> {
-    if let Profile::Rectangle { a, b } = p {
-        Some((
-            [a[0].min(b[0]), a[1].min(b[1])],
-            [a[0].max(b[0]), a[1].max(b[1])],
-        ))
-    } else {
-        None
-    }
-}
 fn relation(a: &Profile, b: &Profile) -> Relation {
-    if let (Some((lo, hi)), Some((blo, bhi))) = (rectangle(a), rectangle(b)) {
-        if (0..2).any(|i| hi[i] < blo[i] - EPS || bhi[i] < lo[i] - EPS) {
-            return Relation::Disjoint;
-        }
-        if (0..2).all(|i| lo[i] < blo[i] - EPS && hi[i] > bhi[i] + EPS) {
-            return Relation::Contains;
-        }
-        if (0..2).all(|i| blo[i] < lo[i] - EPS && bhi[i] > hi[i] + EPS) {
-            return Relation::Inside;
-        }
-        return Relation::Ambiguous;
-    }
-    if let (
-        Profile::Circle {
-            center: a,
-            radius: ar,
-        },
-        Profile::Circle {
-            center: b,
-            radius: br,
-        },
-    ) = (a, b)
-    {
-        let d = (a[0] - b[0]).hypot(a[1] - b[1]);
-        return if d > ar + br + EPS {
-            Relation::Disjoint
-        } else if d + br < ar - EPS {
-            Relation::Contains
-        } else if d + ar < br - EPS {
-            Relation::Inside
-        } else {
-            Relation::Ambiguous
-        };
-    }
-    if let (Some((lo, hi)), Profile::Circle { center, radius }) = (rectangle(a), b) {
-        if (0..2).all(|i| center[i] - radius > lo[i] + EPS && center[i] + radius < hi[i] - EPS) {
-            return Relation::Contains;
-        }
-        if [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
-            .iter()
-            .all(|p| (p[0] - center[0]).hypot(p[1] - center[1]) < radius - EPS)
-        {
-            return Relation::Inside;
-        }
-        let nearest = [center[0].clamp(lo[0], hi[0]), center[1].clamp(lo[1], hi[1])];
-        if (center[0] - nearest[0]).hypot(center[1] - nearest[1]) > radius + EPS {
-            return Relation::Disjoint;
-        }
-        return Relation::Ambiguous;
-    }
-    if matches!(a, Profile::Circle { .. }) && rectangle(b).is_some() {
-        return match relation(b, a) {
-            Relation::Contains => Relation::Inside,
-            Relation::Inside => Relation::Contains,
-            r => r,
-        };
-    }
-    if let Profile::Circle { center, radius } = b {
-        let points = a.outline(0);
-        let mut clearance = f64::INFINITY;
-        for i in 0..points.len() {
-            let p = points[i];
-            let q = points[(i + 1) % points.len()];
-            let dx = q[0] - p[0];
-            let dy = q[1] - p[1];
-            let t = (((center[0] - p[0]) * dx + (center[1] - p[1]) * dy) / (dx * dx + dy * dy))
-                .clamp(0., 1.);
-            let nearest = (p[0] + dx * t - center[0]).hypot(p[1] + dy * t - center[1]);
-            let farthest = (p[0] - center[0])
-                .hypot(p[1] - center[1])
-                .max((q[0] - center[0]).hypot(q[1] - center[1]));
-            if nearest <= radius + EPS && farthest >= radius - EPS {
-                return Relation::Ambiguous;
-            }
-            clearance = clearance.min(nearest);
-        }
-        if point_inside(*center, &points) && clearance > radius + EPS {
-            return Relation::Contains;
-        }
-        if points
-            .iter()
-            .all(|p| (p[0] - center[0]).hypot(p[1] - center[1]) < radius - EPS)
-        {
-            return Relation::Inside;
-        }
-        return Relation::Disjoint;
-    }
-    if matches!(a, Profile::Circle { .. }) {
-        return match relation(b, a) {
-            Relation::Contains => Relation::Inside,
-            Relation::Inside => Relation::Contains,
-            r => r,
-        };
-    }
-    let a = a.outline(0);
-    let b = b.outline(0);
-    for i in 0..a.len() {
-        for j in 0..b.len() {
-            if segments_touch(a[i], a[(i + 1) % a.len()], b[j], b[(j + 1) % b.len()]) {
-                return Relation::Ambiguous;
+    for x in a.boundary() {
+        for y in b.boundary() {
+            match crate::boundary::intersections(x.curve, y.curve) {
+                Ok(hits) if hits.is_empty() => {}
+                _ => return Relation::Ambiguous,
             }
         }
     }
-    if point_inside(b[0], &a) {
+    if a.contains_point(b.boundary()[0].curve.point(0.)) {
         Relation::Contains
-    } else if point_inside(a[0], &b) {
+    } else if b.contains_point(a.boundary()[0].curve.point(0.)) {
         Relation::Inside
     } else {
         Relation::Disjoint
     }
 }
-pub(crate) fn point_inside(p: [f64; 2], polygon: &[[f64; 2]]) -> bool {
-    let mut inside = false;
-    for i in 0..polygon.len() {
-        let a = polygon[i];
-        let b = polygon[(i + 1) % polygon.len()];
-        if (a[1] > p[1]) != (b[1] > p[1])
-            && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]
-        {
-            inside = !inside;
-        }
-    }
-    inside
-}
-fn segments_touch(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
-        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    }
-    fn on(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> bool {
-        cross(a, b, p).abs() <= EPS * (b[0] - a[0]).hypot(b[1] - a[1])
-            && (0..2).all(|i| p[i] >= a[i].min(b[i]) - EPS && p[i] <= a[i].max(b[i]) + EPS)
-    }
-    (cross(a, b, c) * cross(a, b, d) < 0. && cross(c, d, a) * cross(c, d, b) < 0.)
-        || on(a, b, c)
-        || on(a, b, d)
-        || on(c, d, a)
-        || on(c, d, b)
+/// Strict analytic containment used by extrusion and contained-cut validation.
+pub(crate) fn strictly_contains(a: &Profile, b: &Profile) -> bool {
+    relation(a, b) == Relation::Contains
 }
 impl Sketch {
     pub fn profile_by_id(&self, id: u64) -> Result<&Profile> {
@@ -201,12 +72,6 @@ impl Sketch {
                     g.profile_entities
                         .get(&self.profile_ids[*i])
                         .is_none_or(|edges| !edges.iter().any(|id| g.construction.contains(id)))
-                        && !g.entities.iter().any(|(id, e)| {
-                            !g.construction.contains(id)
-                                && matches!(e, crate::sketch::Entity::Arc { .. })
-                                && g.arc_geometry(*id)
-                                    .is_ok_and(|arc| arc.touches_profile(&self.profiles[*i]))
-                        })
                 })
             })
             .collect();
@@ -222,8 +87,10 @@ impl Sketch {
                         // Verified cells of one line arrangement can share edges
                         // or vertices. Their interiors cannot overlap.
                         let certified = self.graph.as_ref().is_some_and(|g| {
-                            g.region_cycles.contains_key(&self.profile_ids[active[i]])
-                                && g.region_cycles.contains_key(&self.profile_ids[active[j]])
+                            (g.region_cycles.contains_key(&self.profile_ids[active[i]])
+                                || g.curve_regions.contains_key(&self.profile_ids[active[i]]))
+                                && (g.region_cycles.contains_key(&self.profile_ids[active[j]])
+                                    || g.curve_regions.contains_key(&self.profile_ids[active[j]]))
                         });
                         if certified {
                             continue;

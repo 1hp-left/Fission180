@@ -6,7 +6,8 @@ use crate::{
     sketch::{Entity, SketchGraph},
 };
 use std::f64::consts::TAU;
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArcGeometry {
     pub center: [f64; 2],
     pub radius: f64,
@@ -123,42 +124,6 @@ impl ArcGeometry {
         (0..=segments.max(1))
             .map(|i| self.point(i as f64 / segments.max(1) as f64))
             .collect()
-    }
-    /// Conservative availability guard until curved arrangement cells exist.
-    /// Never allow a solid command to ignore an arc inside its selected profile.
-    pub(crate) fn touches_profile(self, profile: &crate::Profile) -> bool {
-        if let crate::Profile::Circle { center, radius } = profile {
-            return self.distance_to(*center) <= radius + EPS;
-        }
-        let polygon = profile.outline(0);
-        if crate::region::point_inside(self.point(0.), &polygon)
-            || crate::region::point_inside(self.point(1.), &polygon)
-        {
-            return true;
-        }
-        for i in 0..polygon.len() {
-            let a = polygon[i];
-            let b = polygon[(i + 1) % polygon.len()];
-            let d = [b[0] - a[0], b[1] - a[1]];
-            let len = d[0].hypot(d[1]);
-            let squared = len * len;
-            let m = [a[0] - self.center[0], a[1] - self.center[1]];
-            let t = -(m[0] * d[0] + m[1] * d[1]) / squared;
-            let perpendicular = (m[0] * d[1] - m[1] * d[0]) / len;
-            let delta = (self.radius * self.radius - perpendicular * perpendicular) / squared;
-            if delta < -EPS * 2. * self.radius / squared {
-                continue;
-            }
-            for u in [t - delta.max(0.).sqrt(), t + delta.max(0.).sqrt()] {
-                if u >= -EPS / len
-                    && u <= 1. + EPS / len
-                    && self.contains([a[0] + u * d[0], a[1] + u * d[1]], 2. * EPS)
-                {
-                    return true;
-                }
-            }
-        }
-        false
     }
 }
 impl SketchGraph {

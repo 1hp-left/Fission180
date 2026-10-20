@@ -38,6 +38,7 @@ fn extrusion(
         operation,
         body_id,
         result_body_ids: vec![],
+        boundary_dependencies: None,
         options: Default::default(),
     }
 }
@@ -56,6 +57,7 @@ fn exhausted_ids_are_errors_without_overflow() {
     d.extrusions[0].sketch_id = u64::MAX;
     assert!(d.validate().is_ok());
     assert!(d.next_id().is_err());
+    d.extrusions[0].boundary_dependencies = Some(vec![1]);
     let before = d.to_json().unwrap();
     let mut s = Session::new(d).unwrap();
     assert!(s.document.next_id().is_err());
@@ -87,7 +89,7 @@ fn legacy_indices_resolve_before_regions_and_ambiguous_migration_never_writes() 
         .insert(0, rectangle([60., 0.], [70., 10.]));
     d.extrusions[0].profile = 1;
     let migrated = Document::from_json(&d.to_json().unwrap()).unwrap();
-    assert_eq!(migrated.version, 4);
+    assert_eq!(migrated.version, 5);
     assert_eq!(migrated.extrusions[0].region_id, Some(2));
     assert!((Model::build(&migrated).unwrap().info()[0].volume - 6000.).abs() < 1e-5);
     d.sketches[0].profiles.push(Profile::Circle {
@@ -362,6 +364,7 @@ fn rust_brep_boundary_reconstructed_by_independent_occt_and_step_reader() {
             for co in boundary {
                 let edge = &brep.edges[co.edge];
                 edges.push(match edge.curve {
+                    Curve::Arc { .. } => panic!("This legacy adapter fixture contains only lines/full circles; see curved.rs for bounded arcs"),
                     Curve::Circle {
                         center,
                         normal,

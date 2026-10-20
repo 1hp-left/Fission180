@@ -378,6 +378,7 @@ impl FusionApp {
                 region_id: Some(1),
                 distance_expression: None,
                 result_body_ids: vec![],
+                boundary_dependencies: None,
                 options: Default::default(),
             });
             app.send(Command::Replace(d));
@@ -516,6 +517,7 @@ impl FusionApp {
         }
         let mut d = self.document.clone();
         let feature = Extrusion {
+            boundary_dependencies: None,
             options: dialog.options.clone(),
             id: dialog.editing.or_else(|| d.next_id().ok())?,
             name: format!("Extrude{}", d.extrusions.len() + 1),

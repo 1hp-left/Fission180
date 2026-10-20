@@ -1,6 +1,6 @@
 # Fission 180
 
-Formerly OpenFusion. The active Cargo packages are `fission180-core` and `fission180-desktop`, and the executable is `fission180.exe`. The `openfusion-native` identifier is retained. Version-1 and version-2 documents have explicit in-memory migration; new saves use version 3 for stable references, constraints, expressions and ordered solid commands. Source directories and external evidence paths retain their original names so audit links remain usable. The former TypeScript prototype was removed; this source tree contains the native Rust implementation.
+Formerly OpenFusion. The active Cargo packages are `fission180-core` and `fission180-desktop`, and the executable is `fission180.exe`. The `openfusion-native` identifier is retained. Versions 1–4 have explicit in-memory migration; new saves use version 5 for stable references, exact curved regions, constraints, expressions and ordered solid commands. Source directories and external evidence paths retain their original names so audit links remain usable. The former TypeScript prototype was removed; this source tree contains the native Rust implementation.
 
 The [Fusion architecture and kernel research](docs/fusion-engine-research-2026-10-19.md) explains the current OCCT choice and the proposed path toward an independently written Rust kernel while pursuing measured 1:1 Fusion behavior.
 
@@ -48,7 +48,7 @@ The desktop shell reproduces the observed title/quick-access bars, workspace tab
 
 Working modeling features: rectangles, circles, open line paths, closed polygons, XY/XZ/YZ and principal face sketches, positive/negative extrusion, revolve, sweep, loft, holes, all-edge fillet/chamfer, shell, principal-face Press Pull, translation/copy, mirror, rectangular/circular body patterns, Combine, Split Body, analytic Measure, parameters, dependency replay, local save/load, OCCT STEP/STL export, and model undo/redo. [Command implementation and backend limits](docs/features-2026-10-19.md) lists the exact supported cases.
 
-Many ribbon controls remain visual scaffolding. Unsupported actions have an explanatory tooltip or disabled menu entry. Assemblies, CAM, simulation, general surfaces, drawings and Fusion document import remain absent. Entity constraint editing and Rust topology picking exist; general sketch arrangements, arcs/splines and robust OCCT topology naming are incomplete. Boolean features handle empty and multiple results with persisted output references. The home screen is only a local-workspace scaffold.
+Many ribbon controls remain visual scaffolding. Unsupported actions have an explanatory tooltip or disabled menu entry. Assemblies, CAM, simulation, general surfaces, drawings and Fusion document import remain absent. Entity constraint editing and Rust topology picking exist; general curve arrangements, splines and robust OCCT topology naming are incomplete. Exact line/arc regions and Rust B-rep extrusion are described in [the curved engine record](docs/curved-engine-2026-10-20.md). Boolean features handle empty and multiple results with persisted output references. The home screen is only a local-workspace scaffold.
 
 ## Verification
 

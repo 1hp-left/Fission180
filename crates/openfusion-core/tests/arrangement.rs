@@ -30,6 +30,7 @@ fn volume(s: Sketch, id: u64, backend: Backend) -> (Document, f64) {
             body_id: 3,
             distance_expression: None,
             result_body_ids: vec![],
+            boundary_dependencies: None,
             options: Default::default(),
         }],
         ..Default::default()

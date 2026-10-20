@@ -26,6 +26,7 @@ fn extrusion(id: u64, sketch: u64, body: u64, distance: f64, operation: Operatio
         operation,
         body_id: body,
         result_body_ids: vec![],
+        boundary_dependencies: None,
         options: Default::default(),
     }
 }

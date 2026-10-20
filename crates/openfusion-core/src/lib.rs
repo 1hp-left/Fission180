@@ -6,6 +6,7 @@ use std::{collections::HashSet, io::Cursor, path::Path};
 pub const EPS: f64 = 1e-5;
 pub mod arc;
 mod arrangement;
+pub mod boundary;
 pub mod expression;
 pub mod extrusion;
 pub mod features;
@@ -66,12 +67,49 @@ impl Plane {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Profile {
-    Rectangle { a: [f64; 2], b: [f64; 2] },
-    Circle { center: [f64; 2], radius: f64 },
-    Polygon { points: Vec<[f64; 2]> },
+    Rectangle {
+        a: [f64; 2],
+        b: [f64; 2],
+    },
+    Circle {
+        center: [f64; 2],
+        radius: f64,
+    },
+    Polygon {
+        points: Vec<[f64; 2]>,
+    },
+    Curved {
+        segments: Vec<boundary::BoundarySegment>,
+    },
 }
 impl Profile {
     pub fn geometrically_equal(&self, other: &Self, tolerance: f64) -> bool {
+        if matches!(self, Self::Curved { .. }) || matches!(other, Self::Curved { .. }) {
+            let a = self.boundary();
+            let b = other.boundary();
+            return a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| {
+                    a.source == b.source
+                        && match (a.curve, b.curve) {
+                            (
+                                boundary::PlanarCurve::Line { .. },
+                                boundary::PlanarCurve::Line { .. },
+                            ) => [0., 1.].iter().all(|t| {
+                                boundary::distance(a.curve.point(*t), b.curve.point(*t)) < tolerance
+                            }),
+                            (
+                                boundary::PlanarCurve::Arc { geometry: x },
+                                boundary::PlanarCurve::Arc { geometry: y },
+                            ) => {
+                                boundary::distance(x.center, y.center) < tolerance
+                                    && (x.radius - y.radius).abs() < tolerance
+                                    && (x.sweep - y.sweep).abs() * x.radius < tolerance
+                                    && boundary::distance(x.point(0.), y.point(0.)) < tolerance
+                            }
+                            _ => false,
+                        }
+                });
+        }
         match (self, other) {
             (
                 Self::Circle {
@@ -108,6 +146,20 @@ impl Profile {
                 })
                 .collect(),
             Self::Polygon { points } => points.clone(),
+            Self::Curved { segments: boundary } => boundary
+                .iter()
+                .flat_map(|s| {
+                    let count = match s.curve {
+                        boundary::PlanarCurve::Line { .. } => 1,
+                        boundary::PlanarCurve::Arc { geometry: a } => {
+                            ((segments.max(8) as f64 * a.sweep.abs() / std::f64::consts::TAU).ceil()
+                                as usize)
+                                .max(1)
+                        }
+                    };
+                    (0..count).map(move |i| s.curve.point(i as f64 / count as f64))
+                })
+                .collect(),
         }
     }
     pub fn validate(&self) -> Result<()> {
@@ -129,6 +181,7 @@ impl Profile {
                 }
             }
             Self::Polygon { points } => validate_polygon(points)?,
+            Self::Curved { segments } => boundary::validate_loop(segments)?,
         }
         Ok(())
     }
@@ -138,6 +191,22 @@ impl Profile {
             return Ok(vec![
                 Edge::circle(*radius, plane.normal())?.translate(plane.point(*center, origin)),
             ]);
+        }
+        if let Self::Curved { segments } = self {
+            return segments
+                .iter()
+                .map(|s| match s.curve {
+                    boundary::PlanarCurve::Line { start, end } => Ok(Edge::line(
+                        plane.point(start, origin),
+                        plane.point(end, origin),
+                    )?),
+                    boundary::PlanarCurve::Arc { geometry: a } => Ok(Edge::arc_3pts(
+                        plane.point(a.point(0.), origin),
+                        plane.point(a.point(0.5), origin),
+                        plane.point(a.point(1.), origin),
+                    )?),
+                })
+                .collect();
         }
         let mut points: Vec<DVec3> = self
             .outline(64)
@@ -222,6 +291,10 @@ pub struct Extrusion {
     /// Explicit output IDs, ordered by bounds, for empty or split Boolean results.
     #[serde(default)]
     pub result_body_ids: Vec<u64>,
+    /// Accepted complete region boundary selection (outer followed by holes).
+    /// New/legacy commands acquire this snapshot during preparation.
+    #[serde(default)]
+    pub boundary_dependencies: Option<Vec<u64>>,
     #[serde(default)]
     pub options: extrusion::ExtrudeOptions,
 }
@@ -249,7 +322,7 @@ impl Default for Document {
     fn default() -> Self {
         Self {
             format: "openfusion-native".into(),
-            version: 4,
+            version: 5,
             name: "Untitled".into(),
             units: "mm".into(),
             sketches: vec![],
@@ -320,9 +393,30 @@ impl Document {
     }
     /// Resolve all v1 positional references before generating any regions.
     pub fn upgraded(&self) -> Result<Self> {
-        if self.version == 2 || self.version == 3 {
+        if self.version < 5
+            && (self
+                .extrusions
+                .iter()
+                .any(|e| e.boundary_dependencies.is_some())
+                || self.sketches.iter().any(|s| {
+                    s.profiles
+                        .iter()
+                        .any(|p| matches!(p, Profile::Curved { .. }))
+                        || s.graph
+                            .as_ref()
+                            .is_some_and(|g| !g.curve_regions.is_empty())
+                }))
+        {
+            return invalid("Curved semantics require version 5");
+        }
+        if [2, 3, 4].contains(&self.version) {
             let mut d = self.clone();
-            d.version = 4;
+            d.version = 5;
+            for s in &mut d.sketches {
+                if let Some(g) = &s.graph {
+                    *s = s.refresh_line_regions(g.clone())?;
+                }
+            }
             return Ok(d);
         }
         if self.version != 1 {
@@ -350,7 +444,7 @@ impl Document {
             }
             e.region_id = Some(region.id);
         }
-        d.version = 4;
+        d.version = 5;
         Ok(d)
     }
     pub fn next_id(&self) -> Result<u64> {
@@ -373,7 +467,7 @@ impl Document {
     }
     pub fn validate(&self) -> Result<()> {
         if self.format != "openfusion-native"
-            || ![1, 2, 3, 4].contains(&self.version)
+            || ![1, 2, 3, 4, 5].contains(&self.version)
             || self.units != "mm"
         {
             return invalid("Unsupported document format, version, or units");
@@ -419,6 +513,9 @@ impl Document {
                 }
             }
             for p in &s.profiles {
+                if self.version < 5 && matches!(p, Profile::Curved { .. }) {
+                    return invalid("Curved boundaries require document version 5");
+                }
                 p.validate()?;
             }
             if self.version >= 2 {
@@ -431,10 +528,14 @@ impl Document {
                 }
                 s.regions()?;
                 if let Some(graph) = &s.graph {
+                    if self.version < 5 && !graph.curve_regions.is_empty() {
+                        return invalid("Curved provenance requires document version 5");
+                    }
                     graph.validate()?;
                     if graph
                         .region_cycles
                         .keys()
+                        .chain(graph.curve_regions.keys())
                         .any(|id| *id >= s.next_profile_id)
                     {
                         return invalid("Invalid retained sketch region identity");
@@ -469,10 +570,19 @@ impl Document {
                 return invalid("Extrusion references a missing profile");
             }
             if self.version >= 2 {
-                s.region(
-                    e.region_id
-                        .ok_or_else(|| Error::Invalid("Missing stable region reference".into()))?,
-                )?;
+                let region = s
+                    .region(e.region_id.ok_or_else(|| {
+                        Error::Invalid("Missing stable region reference".into())
+                    })?)?;
+                if let Some(dependencies) = &e.boundary_dependencies {
+                    let current: Vec<_> =
+                        std::iter::once(region.outer).chain(region.inner).collect();
+                    if *dependencies != current {
+                        return invalid(
+                            "Extrusion region split/merged or its hole dependencies changed; repair selection explicitly",
+                        );
+                    }
+                }
             }
             if let Some(text) = &e.distance_expression {
                 if (expression::length(text, &self.parameters)? - e.distance).abs() > EPS {
@@ -526,7 +636,7 @@ impl Document {
                 &serde_json::json!({"format":self.format,"version":1,"name":self.name,"units":self.units,"sketches":sketches,"extrusions":extrusions}),
             )?);
         }
-        if self.version == 2 || self.version == 3 {
+        if [2, 3, 4].contains(&self.version) {
             return self.upgraded()?.to_json();
         }
         Ok(serde_json::to_string_pretty(self)?)
@@ -661,6 +771,14 @@ impl Model {
                 .ok_or_else(|| Error::Invalid("Missing timeline extrusion".into()))?;
             let e = document.extrusions[feature_index].clone();
             let s = document.resolved_sketch(e.sketch_id, &bodies)?;
+            if allocate_outputs && e.boundary_dependencies.is_none() {
+                let region = s.region(
+                    e.region_id
+                        .ok_or_else(|| Error::Invalid("Missing stable region".into()))?,
+                )?;
+                document.extrusions[feature_index].boundary_dependencies =
+                    Some(std::iter::once(region.outer).chain(region.inner).collect());
+            }
             let tool = e.tool(&document, &s, &bodies)?;
             let index = bodies.iter().position(|b| b.id == e.body_id);
             let mut solids = match e.operation {
@@ -987,6 +1105,7 @@ mod tests {
                 region_id: Some(1),
                 distance_expression: None,
                 result_body_ids: vec![],
+                boundary_dependencies: None,
                 options: Default::default(),
             }],
             ..Default::default()
@@ -1031,6 +1150,7 @@ mod tests {
                 region_id: Some(1),
                 distance_expression: None,
                 result_body_ids: vec![],
+                boundary_dependencies: None,
                 options: Default::default(),
             });
             let expected = match operation {

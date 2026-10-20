@@ -210,6 +210,9 @@ impl Sketch {
         graph
             .region_cycles
             .retain(|_, cycle| !cycle.iter().any(|id| removed.contains(id)));
+        graph
+            .curve_regions
+            .retain(|_, key| !key.iter().any(|k| removed.contains(&k.entity)));
         let mut candidate = self.clone();
         let kept: Vec<_> = candidate
             .profile_ids

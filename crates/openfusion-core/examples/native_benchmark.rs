@@ -30,6 +30,7 @@ fn main() {
         region_id: Some(1),
         distance_expression: None,
         result_body_ids: vec![],
+        boundary_dependencies: None,
         options: Default::default(),
     });
     doc.sketches.push(Sketch {
@@ -60,6 +61,7 @@ fn main() {
         region_id: Some(1),
         distance_expression: None,
         result_body_ids: vec![],
+        boundary_dependencies: None,
         options: Default::default(),
     });
     let expected = 6000. - 125. * std::f64::consts::PI;

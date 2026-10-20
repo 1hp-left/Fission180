@@ -157,6 +157,11 @@ fn arcs_support_equal_concentric_construction_deletion_and_shared_endpoints() {
         )
         .unwrap();
     let other = *s.graph.as_ref().unwrap().entities.keys().last().unwrap();
+    // Equal/concentric overlapping curves remain valid construction geometry;
+    // duplicate active boundaries are intentionally rejected by the arrangement.
+    let s = s
+        .with_construction(&[other], true, &Default::default())
+        .unwrap();
     let s = s
         .with_constraints(
             vec![
@@ -231,7 +236,7 @@ fn analytic_arc_reconstruction_matches_occt_sector_volume_and_step() {
 }
 
 #[test]
-fn unsupported_curved_cells_cannot_silently_extrude_the_old_linear_region() {
+fn curved_cells_retire_the_old_linear_region_and_reject_ambiguous_tangencies() {
     let mut s = Sketch {
         id: 1,
         ..Default::default()
@@ -246,10 +251,14 @@ fn unsupported_curved_cells_cannot_silently_extrude_the_old_linear_region() {
         .with_three_point_arc([20., 0.], [25., 5.], [30., 0.], &Default::default())
         .unwrap();
     assert_eq!(outside.regions().unwrap().len(), 1);
+    assert!(
+        s.with_three_point_arc([-10., 0.], [0., 10.], [10., 0.], &Default::default())
+            .is_err()
+    );
     let intersecting = s
-        .with_three_point_arc([-10., 0.], [0., 10.], [10., 0.], &Default::default())
+        .with_three_point_arc([-10., 0.], [0., 8.], [10., 0.], &Default::default())
         .unwrap();
-    assert!(intersecting.regions().unwrap().is_empty());
+    assert_eq!(intersecting.regions().unwrap().len(), 2);
     assert!(intersecting.region(region).is_err());
     let arc = *intersecting
         .graph

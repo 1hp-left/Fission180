@@ -105,6 +105,8 @@ pub struct SketchGraph {
     /// Retained boundary provenance, including temporarily inactive regions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub region_cycles: BTreeMap<u64, Vec<u64>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub curve_regions: BTreeMap<u64, Vec<crate::arrangement::BoundaryUse>>,
 }
 impl Default for SketchGraph {
     fn default() -> Self {
@@ -117,6 +119,7 @@ impl Default for SketchGraph {
             dimension_ids: Default::default(),
             construction: Default::default(),
             region_cycles: Default::default(),
+            curve_regions: Default::default(),
         }
     }
 }
@@ -205,6 +208,26 @@ impl SketchGraph {
                 return invalid("Invalid or ambiguous region boundary provenance");
             }
         }
+        let mut curved = std::collections::BTreeSet::new();
+        for (id, key) in &self.curve_regions {
+            if *id == 0
+                || self.region_cycles.contains_key(id)
+                || key.len() < 2
+                || *key != crate::arrangement::canonical_boundary(key)
+                || !curved.insert(key)
+                || key.iter().enumerate().any(|(i, k)| {
+                    !matches!(
+                        self.entities.get(&k.entity),
+                        Some(Entity::Line { .. } | Entity::Arc { .. })
+                    ) || k.previous != key[(i + key.len() - 1) % key.len()].entity
+                        || k.next != key[(i + 1) % key.len()].entity
+                        || k.start_branch > 1
+                        || k.end_branch > 1
+                })
+            {
+                return invalid("Invalid curved region provenance");
+            }
+        }
         for id in self.dimension_ids.values() {
             if !self.constraints.contains_key(id) {
                 return invalid("Dimension constraint dependency is missing");
@@ -250,6 +273,31 @@ impl SketchGraph {
             return invalid("Duplicate profile graph binding");
         }
         let entities = match p {
+            Profile::Curved { segments } => {
+                p.validate()?;
+                let points: Vec<_> = segments
+                    .iter()
+                    .map(|s| self.point(s.curve.point(0.)))
+                    .collect::<Result<_>>()?;
+                let mut entities = vec![];
+                for (i, s) in segments.iter().enumerate() {
+                    let start = points[i];
+                    let end = points[(i + 1) % points.len()];
+                    let e = match s.curve {
+                        crate::boundary::PlanarCurve::Line { .. } => {
+                            Entity::Line { a: start, b: end }
+                        }
+                        crate::boundary::PlanarCurve::Arc { geometry: a } => Entity::Arc {
+                            center: self.point(a.center)?,
+                            start,
+                            end,
+                            clockwise: a.sweep < 0.,
+                        },
+                    };
+                    entities.push(self.entity(e)?);
+                }
+                entities
+            }
             Profile::Circle { center, radius } => {
                 let center = self.point(*center)?;
                 vec![self.entity(Entity::Circle {
@@ -285,6 +333,19 @@ impl SketchGraph {
         Ok(())
     }
     pub fn profile(&self, id: u64, original: &Profile) -> Result<Profile> {
+        if let Some(key) = self.curve_regions.get(&id) {
+            if key.iter().any(|k| self.construction.contains(&k.entity)) {
+                return self.primitive_profile(id, original);
+            }
+            return self
+                .line_cells()?
+                .into_iter()
+                .find(|c| &c.key == key)
+                .map(|c| c.profile)
+                .ok_or_else(|| {
+                    crate::Error::Invalid("Missing or changed curved region boundary".into())
+                });
+        }
         if let Some(cycle) = self.region_cycles.get(&id) {
             if self
                 .profile_entities
@@ -296,7 +357,7 @@ impl SketchGraph {
             let cell = self
                 .line_cells()?
                 .into_iter()
-                .find(|c| &c.cycle == cycle)
+                .find(|c| c.key.is_empty() && &c.cycle == cycle)
                 .ok_or_else(|| {
                     crate::Error::Invalid("Missing or changed region boundary".into())
                 })?;
@@ -321,6 +382,29 @@ impl SketchGraph {
                 .ok_or_else(|| crate::Error::Invalid("Missing sketch point".into()))
         };
         match original {
+            Profile::Curved { .. } => {
+                let key = self.curve_regions.get(&id).ok_or_else(|| {
+                    crate::Error::Invalid("Missing curved region dependencies".into())
+                })?;
+                let mut segments = vec![];
+                for k in key {
+                    let curve = match self.entities.get(&k.entity) {
+                        Some(Entity::Line { a, b }) => crate::boundary::PlanarCurve::Line {
+                            start: point(a)?,
+                            end: point(b)?,
+                        },
+                        Some(Entity::Arc { .. }) => crate::boundary::PlanarCurve::Arc {
+                            geometry: self.arc_geometry(k.entity)?,
+                        },
+                        _ => return invalid("Missing curved boundary entity"),
+                    };
+                    segments.push(crate::boundary::BoundarySegment {
+                        source: Some(k.entity),
+                        curve: if k.forward { curve } else { curve.reversed() },
+                    });
+                }
+                Ok(Profile::Curved { segments })
+            }
             Profile::Circle { .. } => match self.entities.get(&entities[0]) {
                 Some(Entity::Circle { center, radius }) => Ok(Profile::Circle {
                     center: point(center)?,

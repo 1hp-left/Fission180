@@ -33,6 +33,7 @@ fn extrusion(
         operation,
         body_id,
         result_body_ids: vec![],
+        boundary_dependencies: None,
         options: Default::default(),
     }
 }
