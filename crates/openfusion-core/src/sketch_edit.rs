@@ -1,11 +1,11 @@
-//! Transactional entity editing and simple closed-chain region extraction.
+//! Transactional entity editing and dependency cleanup.
 use crate::{
-    EPS, Profile, Result, Sketch,
+    EPS, Result, Sketch,
     expression::Parameters,
     invalid,
     sketch::{Constraint, Entity, SketchGraph},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 impl Constraint {
     pub fn references(&self) -> Vec<u64> {
         match self {
@@ -17,7 +17,9 @@ impl Constraint {
             | Self::Equal { a, b }
             | Self::Parallel { a, b }
             | Self::Perpendicular { a, b } => vec![*a, *b],
-            Self::Midpoint { point, line } => vec![*point, *line],
+            Self::Midpoint { point, line } | Self::PointOnLine { point, line } => {
+                vec![*point, *line]
+            }
             Self::Horizontal { line } | Self::Vertical { line } | Self::Length { line, .. } => {
                 vec![*line]
             }
@@ -50,65 +52,6 @@ impl SketchGraph {
         }
         Ok(result)
     }
-    fn closed_unbound_chains(&self) -> Vec<Vec<u64>> {
-        let bound: BTreeSet<_> = self
-            .profile_entities
-            .values()
-            .flatten()
-            .copied()
-            .chain(self.construction.iter().copied())
-            .collect();
-        let mut adjacent: BTreeMap<u64, Vec<(u64, u64)>> = BTreeMap::new();
-        for (id, e) in &self.entities {
-            if bound.contains(id) {
-                continue;
-            }
-            if let Entity::Line { a, b } = e {
-                adjacent.entry(*a).or_default().push((*id, *b));
-                adjacent.entry(*b).or_default().push((*id, *a));
-            }
-        }
-        let mut visited = BTreeSet::new();
-        let mut loops = vec![];
-        for (first, e) in &self.entities {
-            let Entity::Line {
-                a: start,
-                b: second,
-            } = e
-            else {
-                continue;
-            };
-            if bound.contains(first) || visited.contains(first) {
-                continue;
-            }
-            let mut chain = vec![*first];
-            let mut cursor = *second;
-            let mut previous = *first;
-            let mut closed = adjacent.get(start).is_some_and(|v| v.len() == 2);
-            while cursor != *start {
-                let Some(next) = adjacent.get(&cursor).filter(|v| v.len() == 2) else {
-                    closed = false;
-                    break;
-                };
-                let Some((edge, to)) = next.iter().find(|(id, _)| *id != previous) else {
-                    closed = false;
-                    break;
-                };
-                if chain.contains(edge) {
-                    closed = false;
-                    break;
-                }
-                chain.push(*edge);
-                previous = *edge;
-                cursor = *to;
-            }
-            visited.extend(chain.iter().copied());
-            if closed && cursor == *start && chain.len() >= 3 {
-                loops.push(chain);
-            }
-        }
-        loops
-    }
 }
 impl Sketch {
     pub fn graph_for_edit(&self) -> Result<SketchGraph> {
@@ -122,29 +65,10 @@ impl Sketch {
         Ok(graph)
     }
     pub fn with_graph(&self, graph: SketchGraph, parameters: &Parameters) -> Result<Self> {
-        let (mut graph, _) = graph.solve(parameters)?;
-        let mut candidate = self.clone();
-        for (id, p) in candidate.profile_ids.iter().zip(&mut candidate.profiles) {
-            *p = graph.profile(*id, p)?;
-            p.validate()?;
-        }
-        for entities in graph.closed_unbound_chains() {
-            let profile = Profile::Polygon {
-                points: graph.loop_points(&entities)?,
-            };
-            profile.validate()?;
-            let id = candidate.next_profile_id;
-            candidate.next_profile_id = id
-                .checked_add(1)
-                .ok_or_else(|| crate::Error::Invalid("Sketch profile IDs exhausted".into()))?;
-            graph.profile_entities.insert(id, entities);
-            candidate.profile_ids.push(id);
-            candidate.profiles.push(profile);
-        }
-        candidate.graph = Some(graph);
-        candidate.regions()?;
-        Ok(candidate)
+        let (graph, _) = graph.solve(parameters)?;
+        self.refresh_line_regions(graph)
     }
+
     pub fn with_constraints(
         &self,
         constraints: Vec<Constraint>,
@@ -280,6 +204,9 @@ impl Sketch {
         graph
             .profile_entities
             .retain(|id, _| !profiles.contains(id));
+        graph
+            .region_cycles
+            .retain(|_, cycle| !cycle.iter().any(|id| removed.contains(id)));
         let mut candidate = self.clone();
         let kept: Vec<_> = candidate
             .profile_ids

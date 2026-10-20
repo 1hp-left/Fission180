@@ -28,6 +28,10 @@ pub enum Constraint {
         point: u64,
         line: u64,
     },
+    PointOnLine {
+        point: u64,
+        line: u64,
+    },
     Concentric {
         a: u64,
         b: u64,
@@ -86,6 +90,9 @@ pub struct SketchGraph {
     pub dimension_ids: BTreeMap<String, u64>,
     #[serde(default)]
     pub construction: std::collections::BTreeSet<u64>,
+    /// Retained boundary provenance, including temporarily inactive regions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub region_cycles: BTreeMap<u64, Vec<u64>>,
 }
 impl Default for SketchGraph {
     fn default() -> Self {
@@ -97,6 +104,7 @@ impl Default for SketchGraph {
             profile_entities: Default::default(),
             dimension_ids: Default::default(),
             construction: Default::default(),
+            region_cycles: Default::default(),
         }
     }
 }
@@ -156,6 +164,19 @@ impl SketchGraph {
         for entities in self.profile_entities.values() {
             if entities.is_empty() || entities.iter().any(|id| !self.entities.contains_key(id)) {
                 return invalid("Profile entity dependencies are missing");
+            }
+        }
+        let mut cycles = std::collections::BTreeSet::new();
+        for (id, cycle) in &self.region_cycles {
+            if *id == 0
+                || cycle.len() < 3
+                || cycle
+                    .iter()
+                    .any(|e| !matches!(self.entities.get(e), Some(Entity::Line { .. })))
+                || *cycle != crate::arrangement::canonical_cycle(cycle)
+                || !cycles.insert(cycle)
+            {
+                return invalid("Invalid or ambiguous region boundary provenance");
             }
         }
         for id in self.dimension_ids.values() {
@@ -238,6 +259,31 @@ impl SketchGraph {
         Ok(())
     }
     pub fn profile(&self, id: u64, original: &Profile) -> Result<Profile> {
+        if let Some(cycle) = self.region_cycles.get(&id) {
+            if self
+                .profile_entities
+                .get(&id)
+                .is_some_and(|edges| edges.iter().any(|e| self.construction.contains(e)))
+            {
+                return self.primitive_profile(id, original);
+            }
+            let cell = self
+                .line_cells()?
+                .into_iter()
+                .find(|c| &c.cycle == cycle)
+                .ok_or_else(|| {
+                    crate::Error::Invalid("Missing or changed region boundary".into())
+                })?;
+            if matches!(original, Profile::Rectangle { .. }) {
+                return self.primitive_profile(id, original);
+            }
+            return Ok(Profile::Polygon {
+                points: cell.points,
+            });
+        }
+        self.primitive_profile(id, original)
+    }
+    pub(crate) fn primitive_profile(&self, id: u64, original: &Profile) -> Result<Profile> {
         let entities = self
             .profile_entities
             .get(&id)
@@ -518,6 +564,17 @@ impl SketchGraph {
                     let (a, b) = line(*l)?;
                     residual.extend([p[0] - (a[0] + b[0]) * 0.5, p[1] - (a[1] + b[1]) * 0.5]);
                 }
+                Constraint::PointOnLine { point: p, line: l } => {
+                    let p = point(*p)?;
+                    let (a, b) = line(*l)?;
+                    let len = length(*l)?;
+                    if len < EPS {
+                        return invalid("Degenerate point-on-line dependency");
+                    }
+                    residual.push(
+                        ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) / len,
+                    );
+                }
                 Constraint::Concentric { a, b } => {
                     let a = circle(*a)?.0;
                     let b = circle(*b)?.0;
@@ -708,12 +765,7 @@ impl crate::Sketch {
             graph
         };
         graph.set_dimensions(profile_id, self.profile_by_id(profile_id)?, &text)?;
-        let (solved, _) = graph.solve(parameters)?;
-        for (id, p) in candidate.profile_ids.iter().zip(&mut candidate.profiles) {
-            *p = solved.profile(*id, p)?;
-            p.validate()?;
-        }
-        candidate.graph = Some(solved);
+        candidate = candidate.with_graph(graph, parameters)?;
         candidate.dimension_expressions.insert(profile_id, text);
         candidate.regions()?;
         Ok(candidate)

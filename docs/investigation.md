@@ -4,6 +4,8 @@ Started: 2026-10-18. Updated: 2026-10-19. Target: Autodesk Fusion, previously ca
 
 ## Current status: installed Fusion and native Rust reconstruction
 
+[Connected line arrangement and editing batch](sketch-arrangements-2026-10-19.md) implements crossing/branched line regions, retained source-boundary identities, split/merge dependency rejection and native Trim/Extend with persisted intersection constraints. Analytic cell volumes execute on explicit OCCT/Rust backends; 56 workspace tests pass. Fresh matched Fusion interactions remain blocked; this is independent implementation evidence.
+
 [Implemented solid-command batch](features-2026-10-19.md) adds independently written application commands using explicit OCCT or scoped Rust execution: revolve, sweep, loft, hole, edge finishing, shell, face offset, transforms, patterns, Combine and Split Body. It records 17 saved/reopened native fixtures and OCCT STEP measurement checks, explicit mixed command order, face-supported sketches and dependency editing. This is implementation evidence; fresh matching Fusion command scenarios remain unverified.
 
 [Entity editing batch](sketch-editing-2026-10-19.md) connects graph selection, constraint creation/removal, line/circle dimensions, constrained point dragging, construction state, simple closed line regions and sketch rollback display. These are independently implemented application behaviors. Matched Fusion constraint glyphs, interaction states and solving behavior remain unverified.

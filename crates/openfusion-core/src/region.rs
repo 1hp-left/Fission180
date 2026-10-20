@@ -184,10 +184,11 @@ impl Sketch {
             }
         }
         graph.add_profile(id, &profile)?;
-        self.graph = Some(graph);
-        self.profiles.push(profile);
-        self.profile_ids.push(id);
-        self.next_profile_id = next;
+        let mut candidate = self.clone();
+        candidate.profiles.push(profile);
+        candidate.profile_ids.push(id);
+        candidate.next_profile_id = next;
+        *self = candidate.refresh_line_regions(graph)?;
         Ok(id)
     }
     pub fn regions(&self) -> Result<Vec<Region>> {
@@ -212,6 +213,15 @@ impl Sketch {
                     Relation::Inside => contains[j][i] = true,
                     Relation::Disjoint => {}
                     Relation::Ambiguous => {
+                        // Verified cells of one line arrangement can share edges
+                        // or vertices. Their interiors cannot overlap.
+                        let certified = self.graph.as_ref().is_some_and(|g| {
+                            g.region_cycles.contains_key(&self.profile_ids[active[i]])
+                                && g.region_cycles.contains_key(&self.profile_ids[active[j]])
+                        });
+                        if certified {
+                            continue;
+                        }
                         return invalid(
                             "Touching/intersecting or polygon loop arrangements are unsupported; selection is ambiguous",
                         );

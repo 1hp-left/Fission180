@@ -71,3 +71,50 @@ fn complete_control_chord_is_recognized_after_control_is_released() {
         "Use the modifiers attached to each event, not the final frame's modifier state"
     );
 }
+
+#[test]
+fn trim_and_extend_undo_redo_restore_entities_dependencies_and_region_registry() {
+    let mut original = Sketch::default();
+    for (a, b) in [
+        ([0., 0.], [10., 0.]),
+        ([3., -5.], [3., 5.]),
+        ([7., -5.], [7., 5.]),
+    ] {
+        original = original.with_line(a, b, &Default::default()).unwrap();
+    }
+    let source = *original
+        .graph
+        .as_ref()
+        .unwrap()
+        .entities
+        .keys()
+        .next()
+        .unwrap();
+    let mut history = SketchHistory::default();
+    history.record(&original);
+    let mut draft = original
+        .with_trimmed_line(source, [5., 0.], &Default::default())
+        .unwrap();
+    let trimmed = draft.clone();
+    history.undo(&mut draft);
+    assert_eq!(draft, original);
+    history.redo(&mut draft);
+    assert_eq!(draft, trimmed);
+    let source = *draft
+        .graph
+        .as_ref()
+        .unwrap()
+        .entities
+        .keys()
+        .last()
+        .unwrap();
+    history.record(&draft);
+    draft = draft
+        .with_extended_line(source, [7.1, 0.], &Default::default())
+        .unwrap();
+    let extended = draft.clone();
+    history.undo(&mut draft);
+    assert_eq!(draft, trimmed);
+    history.redo(&mut draft);
+    assert_eq!(draft, extended);
+}

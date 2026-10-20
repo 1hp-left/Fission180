@@ -129,6 +129,8 @@ enum Tool {
     Circle,
     Polyline,
     Line,
+    Trim,
+    Extend,
     Dimension,
     Relation(&'static str),
 }
@@ -685,6 +687,9 @@ impl FusionApp {
             if ctx.input(|i| i.key_pressed(Key::X)) {
                 self.toggle_construction();
             }
+            if ctx.input(|i| !i.modifiers.ctrl && i.key_pressed(Key::T)) {
+                self.start_line_edit(false);
+            }
             if ctx.input(|i| i.key_pressed(Key::Enter)) && self.polyline.len() >= 3 {
                 let points = std::mem::take(&mut self.polyline);
                 self.add_profile(Profile::Polygon { points });
@@ -999,17 +1004,29 @@ impl FusionApp {
             ] {
                 let supported = matches!(
                     name,
-                    "Horizontal / Vertical" | "Perpendicular" | "Tangent" | "Equal" | "Parallel"
+                    "Trim"
+                        | "Extend"
+                        | "Horizontal / Vertical"
+                        | "Perpendicular"
+                        | "Tangent"
+                        | "Equal"
+                        | "Parallel"
                 );
                 if tool_button(
                     ui,
                     rect(x, 80., 36., 36.),
                     k,
                     name,
-                    self.tool == Tool::Relation(name),
+                    self.tool == Tool::Relation(name)
+                        || (name == "Trim" && self.tool == Tool::Trim)
+                        || (name == "Extend" && self.tool == Tool::Extend),
                     supported,
                 ) {
-                    self.start_relation(name);
+                    if name == "Trim" || name == "Extend" {
+                        self.start_line_edit(name == "Extend");
+                    } else {
+                        self.start_relation(name);
+                    }
                 }
             }
             for (name, x, width) in [
@@ -1972,7 +1989,12 @@ impl FusionApp {
                 ("Fix / UnFix", "", true),
             ],
             "MODIFY" if self.mode == Mode::Sketch => {
-                vec![("Construction", "X", true), ("Delete", "Del", true)]
+                vec![
+                    ("Trim", "T", true),
+                    ("Extend", "", true),
+                    ("Construction", "X", true),
+                    ("Delete", "Del", true),
+                ]
             }
             "CREATE" => vec![
                 ("Create Sketch", "", true),
@@ -2065,6 +2087,8 @@ impl FusionApp {
                 | "Equal"
                 | "Fix / UnFix" => self.start_relation(action),
                 "Construction" => self.toggle_construction(),
+                "Trim" => self.start_line_edit(false),
+                "Extend" => self.start_line_edit(true),
                 "Delete" => self.delete_sketch_selection(),
                 "New Design" => {
                     if !self.busy {
@@ -2157,12 +2181,7 @@ impl FusionApp {
                 self.paint_profile(&painter, r, profile, sketch, selected, false);
             }
             if let Some(graph) = &sketch.graph {
-                let bound: std::collections::HashSet<_> =
-                    graph.profile_entities.values().flatten().collect();
                 for (id, entity) in &graph.entities {
-                    if bound.contains(id) {
-                        continue;
-                    }
                     if let fission180_core::sketch::Entity::Line { a, b } = entity {
                         if let (Some(a), Some(b)) = (graph.points.get(a), graph.points.get(b)) {
                             let a = self
@@ -2279,7 +2298,7 @@ impl FusionApp {
                     }
                 } else if sketch_active {
                     let mut local = self.sketch_local(pos, r);
-                    if self.snap {
+                    if self.snap && !matches!(self.tool, Tool::Trim | Tool::Extend) {
                         let snap = self.sketch_snap(local);
                         local = snap.0;
                         if let Some(kind) = snap.1 {
@@ -2292,6 +2311,9 @@ impl FusionApp {
                                 label(&painter, at + vec2(9., -9.), kind, 11., TEXT);
                             }
                         }
+                    }
+                    if matches!(self.tool, Tool::Trim | Tool::Extend) {
+                        self.paint_line_edit_hover(&painter, pos, r);
                     }
                     if let Some(anchor) = self.anchor {
                         if self.tool == Tool::Line {
@@ -2423,6 +2445,7 @@ impl FusionApp {
                                 self.select_sketch_item(pos, r, true);
                                 self.apply_relation(name);
                             }
+                            Tool::Trim | Tool::Extend => self.apply_line_edit(pos, r),
                         }
                     }
                 } else if response.clicked() {
@@ -2467,6 +2490,8 @@ impl FusionApp {
                 }
                 Tool::Polyline => "Click vertices; click the first point or press Enter to close",
                 Tool::Line => "Click endpoints; Escape ends the line chain",
+                Tool::Trim => "Click the line segment to remove; Escape ends Trim",
+                Tool::Extend => "Click near the line end to extend to the next sketch line",
                 Tool::Relation(_) => "Select sketch geometry to constrain; Escape ends the command",
                 _ => "",
             }

@@ -37,6 +37,7 @@ fn glyph(c: &Constraint) -> &'static str {
         Constraint::Fixed { .. } => "▣",
         Constraint::Coincident { .. } => "○",
         Constraint::Midpoint { .. } => "△",
+        Constraint::PointOnLine { .. } => "○",
         Constraint::Concentric { .. } => "◎",
         Constraint::Horizontal { .. } => "━",
         Constraint::Vertical { .. } => "┃",
@@ -119,6 +120,89 @@ pub(super) fn snap_point(
     (p, kind)
 }
 impl FusionApp {
+    pub(super) fn start_line_edit(&mut self, extend: bool) {
+        self.tool = if extend { Tool::Extend } else { Tool::Trim };
+        self.anchor = None;
+        self.polyline.clear();
+        self.sketch_selection.clear();
+        self.status = if extend {
+            "Extend: click near a line end"
+        } else {
+            "Trim: click a segment between intersections (T)"
+        }
+        .into();
+    }
+    fn line_edit_hit(&self, at: Pos2, r: Rect) -> Option<u64> {
+        let s = self.draft.as_ref()?;
+        let g = s.graph.as_ref()?;
+        g.entities
+            .iter()
+            .filter_map(|(id, e)| {
+                let Entity::Line { a, b } = e else {
+                    return None;
+                };
+                let a = self
+                    .camera
+                    .project(s.plane.point(g.points[a], s.origin).to_array(), r)
+                    .0;
+                let b = self
+                    .camera
+                    .project(s.plane.point(g.points[b], s.origin).to_array(), r)
+                    .0;
+                let d = b - a;
+                let t = ((at - a).dot(d) / d.length_sq().max(1e-10)).clamp(0., 1.);
+                let distance = (at - (a + d * t)).length();
+                (distance < 6.).then_some((distance, *id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|v| v.1)
+    }
+    pub(super) fn paint_line_edit_hover(&self, p: &Painter, at: Pos2, r: Rect) {
+        let Some(id) = self.line_edit_hit(at, r) else {
+            return;
+        };
+        let Some(s) = &self.draft else {
+            return;
+        };
+        let Some(g) = &s.graph else {
+            return;
+        };
+        if let Entity::Line { a, b } = g.entities[&id] {
+            let points = [g.points[&a], g.points[&b]].map(|v| {
+                self.camera
+                    .project(s.plane.point(v, s.origin).to_array(), r)
+                    .0
+            });
+            p.line_segment(
+                points,
+                Stroke::new(
+                    2.5,
+                    if self.tool == Tool::Trim {
+                        C::from_rgb(238, 139, 116)
+                    } else {
+                        TEXT
+                    },
+                ),
+            );
+        }
+    }
+    pub(super) fn apply_line_edit(&mut self, at: Pos2, r: Rect) {
+        let Some(id) = self.line_edit_hit(at, r) else {
+            return;
+        };
+        let Some(s) = &self.draft else {
+            return;
+        };
+        let local = self.sketch_local(at, r);
+        let result = if self.tool == Tool::Extend {
+            s.with_extended_line(id, local, &self.document.parameters)
+        } else {
+            s.with_trimmed_line(id, local, &self.document.parameters)
+        };
+        self.accept_sketch(result);
+        self.sketch_selection.clear();
+        self.selected = None;
+    }
     pub(super) fn edit_sketch(&mut self, s: Sketch) {
         self.sketch_history = Default::default();
         self.sketch_selection.clear();

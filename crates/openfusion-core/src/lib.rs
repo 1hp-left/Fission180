@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io::Cursor, path::Path};
 
 pub const EPS: f64 = 1e-5;
+mod arrangement;
 pub mod expression;
 pub mod extrusion;
 pub mod features;
 pub mod kernel;
+mod line_edit;
 pub mod persistence;
 pub mod region;
 pub mod sketch;
@@ -246,7 +248,7 @@ impl Default for Document {
     fn default() -> Self {
         Self {
             format: "openfusion-native".into(),
-            version: 3,
+            version: 4,
             name: "Untitled".into(),
             units: "mm".into(),
             sketches: vec![],
@@ -299,11 +301,7 @@ impl Document {
         let mut d = self.upgraded()?;
         for s in &mut d.sketches {
             if let Some(graph) = &s.graph {
-                let (solved, _) = graph.solve(&d.parameters)?;
-                for (id, p) in s.profile_ids.iter().zip(&mut s.profiles) {
-                    *p = solved.profile(*id, p)?;
-                }
-                s.graph = Some(solved);
+                *s = s.with_graph(graph.clone(), &d.parameters)?;
             }
         }
         for e in &mut d.extrusions {
@@ -321,9 +319,9 @@ impl Document {
     }
     /// Resolve all v1 positional references before generating any regions.
     pub fn upgraded(&self) -> Result<Self> {
-        if self.version == 2 {
+        if self.version == 2 || self.version == 3 {
             let mut d = self.clone();
-            d.version = 3;
+            d.version = 4;
             return Ok(d);
         }
         if self.version != 1 {
@@ -351,7 +349,7 @@ impl Document {
             }
             e.region_id = Some(region.id);
         }
-        d.version = 3;
+        d.version = 4;
         Ok(d)
     }
     pub fn next_id(&self) -> Result<u64> {
@@ -374,7 +372,7 @@ impl Document {
     }
     pub fn validate(&self) -> Result<()> {
         if self.format != "openfusion-native"
-            || ![1, 2, 3].contains(&self.version)
+            || ![1, 2, 3, 4].contains(&self.version)
             || self.units != "mm"
         {
             return invalid("Unsupported document format, version, or units");
@@ -433,6 +431,13 @@ impl Document {
                 s.regions()?;
                 if let Some(graph) = &s.graph {
                     graph.validate()?;
+                    if graph
+                        .region_cycles
+                        .keys()
+                        .any(|id| *id >= s.next_profile_id)
+                    {
+                        return invalid("Invalid retained sketch region identity");
+                    }
                     graph.validate_solution(&self.parameters)?;
                     for (id, p) in s.profile_ids.iter().zip(&s.profiles) {
                         let derived = graph.profile(*id, p)?;
@@ -520,7 +525,7 @@ impl Document {
                 &serde_json::json!({"format":self.format,"version":1,"name":self.name,"units":self.units,"sketches":sketches,"extrusions":extrusions}),
             )?);
         }
-        if self.version == 2 {
+        if self.version == 2 || self.version == 3 {
             return self.upgraded()?.to_json();
         }
         Ok(serde_json::to_string_pretty(self)?)
