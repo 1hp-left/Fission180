@@ -1,5 +1,49 @@
 use super::*;
 use fission180_core::extrusion::{Direction, Extent};
+/// The same draft-to-document path is used by preview and OK in the native UI.
+pub(super) fn edited_document(document: &Document, dialog: &ExtrudeDialog) -> Option<Document> {
+    let distance =
+        fission180_core::expression::length(&dialog.distance, &document.parameters).ok()?;
+    if distance.abs() < 1e-5 {
+        return None;
+    }
+    let region_id = *document
+        .sketches
+        .iter()
+        .find(|s| s.id == dialog.sketch_id)?
+        .profile_ids
+        .get(dialog.profile)?;
+    let original = dialog
+        .editing
+        .and_then(|id| document.extrusions.iter().find(|e| e.id == id));
+    let feature = Extrusion {
+        boundary_dependencies: original
+            .filter(|e| e.sketch_id == dialog.sketch_id && e.region_id == Some(region_id))
+            .and_then(|e| e.boundary_dependencies.clone()),
+        result_body_ids: original
+            .map(|e| e.result_body_ids.clone())
+            .unwrap_or_default(),
+        options: dialog.options.clone(),
+        id: dialog.editing.or_else(|| document.next_id().ok())?,
+        name: original
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| format!("Extrude{}", document.extrusions.len() + 1)),
+        sketch_id: dialog.sketch_id,
+        profile: dialog.profile,
+        distance,
+        operation: dialog.operation,
+        body_id: dialog.body_id,
+        region_id: Some(region_id),
+        distance_expression: Some(dialog.distance.clone()),
+    };
+    let mut d = document.clone();
+    if let Some(id) = dialog.editing {
+        *d.extrusions.iter_mut().find(|e| e.id == id)? = feature;
+    } else {
+        d.push_extrusion(feature);
+    }
+    Some(d)
+}
 impl FusionApp {
     pub(super) fn edit_extrusion(&mut self, id: u64) {
         if self.busy {
@@ -364,5 +408,60 @@ impl FusionApp {
                 self.send(Command::Preview(d));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fission180_core::{Model, Session};
+    #[test]
+    fn native_extrude_editor_replays_rust_pockets_without_rebinding_boundary_dependencies() {
+        let mut session =
+            Session::new(crate::engine_examples::Example::Pockets.document().unwrap()).unwrap();
+        let original = session.document.extrusions[2].clone();
+        let dialog = ExtrudeDialog {
+            editing: Some(original.id),
+            sketch_id: original.sketch_id,
+            profile: 0,
+            distance: "-4 mm".into(),
+            operation: Operation::Cut,
+            body_id: 3,
+            last_preview: String::new(),
+            input: fission180_core::expression::DraftInput::new(
+                "-4 mm".into(),
+                &session.document.parameters,
+            ),
+            options: original.options.clone(),
+        };
+        let edited = edited_document(&session.document, &dialog).unwrap();
+        let volume = session.model.info()[0].volume;
+        assert_eq!(
+            edited.extrusions[2].boundary_dependencies,
+            original.boundary_dependencies
+        );
+        assert_eq!(
+            edited.extrusions[2].result_body_ids,
+            original.result_body_ids
+        );
+        session
+            .replace_with_display(edited, Model::display_mesh)
+            .unwrap();
+        assert!(session.model.info()[0].volume > volume);
+        let accepted = session.document.clone();
+        let mut changed = accepted.clone();
+        changed.sketches[2]
+            .add_profile(Profile::Circle {
+                center: [5., 0.],
+                radius: 2.,
+            })
+            .unwrap();
+        let candidate = edited_document(&changed, &dialog).unwrap();
+        assert!(
+            session
+                .replace_with_display(candidate, Model::display_mesh)
+                .is_err()
+        );
+        assert_eq!(session.document, accepted);
     }
 }

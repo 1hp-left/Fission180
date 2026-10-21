@@ -50,6 +50,31 @@ pub fn triangulate_polygon(points: &[Pos2]) -> Vec<[usize; 3]> {
 mod polygon_tests {
     use super::*;
     #[test]
+    fn fit_keeps_translated_geometry_clear_of_browser_and_command_panels() {
+        let source = DisplayMesh {
+            vertices: vec![
+                [100., -200., 5.],
+                [160., -200., 5.],
+                [160., -140., 15.],
+                [100., -140., 15.],
+            ],
+            ..Default::default()
+        };
+        let r = Rect::from_min_size(pos2(0., 140.), vec2(1536., 674.));
+        let mut camera = Camera::default();
+        camera.fit(&source, r);
+        let mut bounds = Rect::NOTHING;
+        for p in &source.vertices {
+            bounds.extend_with(camera.project(*p, r).0);
+        }
+        assert!((bounds.center() - r.center()).length() < 0.1);
+        assert!(bounds.left() >= 320. - 0.1 && bounds.right() <= r.right() - 320. + 0.1);
+        assert!(bounds.top() >= r.top() + 90. - 0.1 && bounds.bottom() <= r.bottom() - 90. + 0.1);
+        let same = camera;
+        camera.fit(&DisplayMesh::default(), r);
+        assert!(camera == same);
+    }
+    #[test]
     fn concave_profile_display_preserves_area_in_either_orientation() {
         let mut points = vec![
             pos2(0., 0.),
@@ -210,6 +235,23 @@ impl Default for Camera {
     }
 }
 impl Camera {
+    pub fn fit(&mut self, mesh: &DisplayMesh, r: Rect) {
+        if mesh.vertices.is_empty() {
+            return;
+        }
+        self.scale = 1.;
+        self.pan = Vec2::ZERO;
+        let mut bounds = Rect::NOTHING;
+        for point in &mesh.vertices {
+            bounds.extend_with(self.project(*point, r).0);
+        }
+        let available = vec2((r.width() - 640.).max(200.), (r.height() - 180.).max(150.));
+        let center = bounds.center() - r.center();
+        self.scale = (available.x / bounds.width().max(1.))
+            .min(available.y / bounds.height().max(1.))
+            .clamp(0.05, 50.);
+        self.pan = -center * self.scale;
+    }
     pub fn origin(&self, r: Rect) -> Pos2 {
         r.center() + self.pan
     }

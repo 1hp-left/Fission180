@@ -43,6 +43,11 @@ These are pending comparison protocols, not completed tests. Link each completed
 
 ## Independent engine phase — 2026-10-20
 
+[Desktop engine integration](desktop-engine-2026-10-20.md) makes the independent
+Rust engine directly testable in the native application with six editable
+examples, explicit engine status, live command replay and worker rollback tests.
+Native captures verify the Fission display path separately from Fusion parity.
+
 [Overlapping same-cap blind pockets](overlapping-pockets-2026-10-20.md) use exact
 occupied sections and shared stepped topology, including unequal depths,
 annular pockets and preserved disjoint through-holes. Unsupported opposite-side,

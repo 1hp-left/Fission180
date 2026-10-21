@@ -4,6 +4,12 @@ Started: 2026-10-18. Updated: 2026-10-20. Target: Autodesk Fusion, previously ca
 
 ## Current status: installed Fusion and native Rust reconstruction
 
+[Rust engine desktop integration](desktop-engine-2026-10-20.md) exposes editable
+Rust examples in the File menu, actual displayed-engine status, measured backend
+tags and native worker/viewport checks. It preserves preview/undo/file safety
+and extrusion boundary dependencies. These are Fission desktop checks, not new
+Fusion comparison evidence.
+
 [Overlapping same-cap blind pockets](overlapping-pockets-2026-10-20.md) adds
 occupied axial sections, exact overlap accounting, stepped floors/walls and
 validated shared topology, with analytic and independent OCCT acceptance. It

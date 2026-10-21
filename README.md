@@ -22,6 +22,23 @@ Or launch the compiled application:
 
 The application runs natively. There is no Node.js process, browser, or WebView in its runtime. Rust owns application state, input, persistence, history, and rendering. OpenCascade 8.0.1 through `cadrum` remains the default solid backend. The File menu explicitly selects OCCT or the limited independently written Rust analytic backend. Unsupported Rust operations return errors without OCCT fallback.
 
+To try the independent engine, choose **File → Rust Engine Examples…**. Six editable
+designs exercise a sidewall notch, circle Join/Intersect, split and annular cuts,
+and overlapping blind pockets. The viewport footer shows the engine that produced
+the displayed geometry; Measure also identifies the engine. Double-click a feature
+in the timeline to edit it. Example loading is undoable and clears the previous
+file's save path, so saving an example asks for a new destination.
+
+Open an example directly with the current executable:
+
+```powershell
+.\target\release\fission180.exe --engine-example pockets
+```
+
+Other example keys are `notch`, `join`, `intersect`, `split`, and `annular`.
+For a blank design, choose **File → Use Rust Analytic Kernel**, then sketch and
+extrude normally. Fresh documents continue to use OCCT by default.
+
 Build requirements: Rust 1.95 or newer and a Windows MSVC C++ toolchain. The first Cargo build downloads dependencies and the binding's prebuilt OpenCascade archive. Both lockfile and kernel binding version are pinned. Development was verified with Rust 1.97.1 on Windows.
 
 ## First modeling workflow

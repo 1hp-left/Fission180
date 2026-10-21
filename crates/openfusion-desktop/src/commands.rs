@@ -507,6 +507,7 @@ impl FusionApp {
                 if dialog.tool == "Measure" {
                     if let Some(body) = self.committed_bodies.iter().find(|b| b.id == dialog.target)
                     {
+                        ui.label(format!("Engine: {}", body.backend.label()));
                         ui.label(format!("Volume: {:.4} mm³", body.volume));
                         ui.label(format!("Area: {:.4} mm²", body.surface_area));
                         for (axis, i) in [("X", 0), ("Y", 1), ("Z", 2)] {

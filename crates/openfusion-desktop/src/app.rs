@@ -1,3 +1,4 @@
+use crate::engine_examples::Example;
 use crate::{
     icons::{Icon, arrow, icon},
     view::{Camera, Pick, RenderCache},
@@ -7,6 +8,7 @@ use eframe::egui::{
     self, Align2, Color32 as C, FontId, Id, Key, Painter, Pos2, Rect, Sense, Shape, Stroke, Vec2,
     pos2, vec2,
 };
+use fission180_core::kernel::Backend;
 use fission180_core::{
     BodyInfo, DisplayMesh, Document, Extrusion, Operation, Plane, Profile, Sketch,
 };
@@ -178,6 +180,8 @@ pub struct FusionApp {
     mesh: DisplayMesh,
     bodies: Vec<BodyInfo>,
     committed_bodies: Vec<BodyInfo>,
+    display_backend: Backend,
+    fit_pending: bool,
     camera: Camera,
     cache: RenderCache,
     revision: u64,
@@ -223,6 +227,7 @@ pub struct FusionApp {
     dim_height: String,
     dim_radius: String,
     capture: Option<PathBuf>,
+    capture_report: Option<PathBuf>,
     capture_frames: u32,
     close_after_capture: bool,
     pending_extrude: bool,
@@ -279,6 +284,8 @@ impl FusionApp {
             mesh: DisplayMesh::default(),
             bodies: vec![],
             committed_bodies: vec![],
+            display_backend: Backend::Occt,
+            fit_pending: false,
             camera: Camera::default(),
             cache: RenderCache::default(),
             revision: 0,
@@ -324,6 +331,7 @@ impl FusionApp {
             dim_height: "30".into(),
             dim_radius: "10".into(),
             capture: None,
+            capture_report: None,
             capture_frames: 0,
             close_after_capture: false,
             pending_extrude: false,
@@ -339,6 +347,9 @@ impl FusionApp {
         if let Some(i) = args.iter().position(|a| a == "--capture") {
             app.capture = args.get(i + 1).map(PathBuf::from);
             app.close_after_capture = args.iter().any(|a| a == "--exit-after-capture");
+        }
+        if let Some(i) = args.iter().position(|a| a == "--capture-report") {
+            app.capture_report = args.get(i + 1).map(PathBuf::from);
         }
         if args.iter().any(|a| a == "--sketch") {
             if app.busy {
@@ -383,6 +394,16 @@ impl FusionApp {
             });
             app.send(Command::Replace(d));
         }
+        if let Some(i) = args.iter().position(|a| a == "--engine-example") {
+            if let Some(example) = args.get(i + 1).and_then(|key| Example::from_key(key)) {
+                app.load_engine_example(example);
+            } else {
+                app.error = Some(
+                    "Choose an engine example: notch, join, intersect, split, annular, pockets"
+                        .into(),
+                );
+            }
+        }
         if let Some(i) = args.iter().position(|a| a == "--command") {
             if let Some(name) = args.get(i + 1) {
                 if app.busy {
@@ -398,6 +419,25 @@ impl FusionApp {
         self.worker.send(c);
         self.busy = true;
         self.error = None;
+    }
+    fn load_engine_example(&mut self, example: Example) {
+        if self.busy
+            || self.mode != Mode::Design
+            || self.extrude.is_some()
+            || self.modeling.is_some()
+        {
+            return;
+        }
+        match example.document() {
+            Ok(document) => {
+                self.fit_pending = true;
+                self.home = false;
+                self.sketches_expanded = true;
+                self.bodies_expanded = true;
+                self.send(Command::Example(document));
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
     }
     fn begin_sketch(&mut self, plane: Plane) {
         if self.busy {
@@ -508,49 +548,7 @@ impl FusionApp {
         self.camera.top = false;
     }
     fn extrusion_document(&self) -> Option<Document> {
-        let dialog = self.extrude.as_ref()?;
-        let distance =
-            fission180_core::expression::length(&dialog.distance, &self.document.parameters)
-                .ok()?;
-        if distance.abs() < 1e-5 {
-            return None;
-        }
-        let mut d = self.document.clone();
-        let feature = Extrusion {
-            boundary_dependencies: None,
-            options: dialog.options.clone(),
-            id: dialog.editing.or_else(|| d.next_id().ok())?,
-            name: format!("Extrude{}", d.extrusions.len() + 1),
-            sketch_id: dialog.sketch_id,
-            profile: dialog.profile,
-            distance,
-            operation: dialog.operation,
-            body_id: dialog.body_id,
-
-            region_id: self
-                .document
-                .sketches
-                .iter()
-                .find(|s| s.id == dialog.sketch_id)?
-                .profile_ids
-                .get(dialog.profile)
-                .copied(),
-            distance_expression: Some(dialog.distance.clone()),
-            result_body_ids: dialog
-                .editing
-                .and_then(|id| d.extrusions.iter().find(|e| e.id == id))
-                .map(|e| e.result_body_ids.clone())
-                .unwrap_or_default(),
-        };
-        if let Some(id) = dialog.editing {
-            let current = d.extrusions.iter_mut().find(|e| e.id == id)?;
-            let name = current.name.clone();
-            *current = feature;
-            current.name = name;
-        } else {
-            d.push_extrusion(feature);
-        }
-        Some(d)
+        extrude::edited_document(&self.document, self.extrude.as_ref()?)
     }
     fn cancel(&mut self) {
         if self.tool == Tool::Arc && self.mode == Mode::Sketch {
@@ -1979,15 +1977,24 @@ impl FusionApp {
         let Some((name, position)) = self.menu else {
             return;
         };
+        let engine_available = !self.busy
+            && self.mode == Mode::Design
+            && self.extrude.is_none()
+            && self.modeling.is_none();
         let entries: Vec<(&str, &str, bool)> = match name {
             "File" => vec![
                 ("New Design", "Ctrl+N", true),
                 ("Open…", "Ctrl+O", true),
                 ("Save", "Ctrl+S", true),
                 ("Export…", "", true),
-                ("Use OCCT Kernel", "", true),
-                ("Use Rust Analytic Kernel", "", true),
+                ("Use OCCT Kernel", "", engine_available),
+                ("Use Rust Analytic Kernel", "", engine_available),
+                ("Rust Engine Examples…", "", engine_available),
             ],
+            "Rust Engine Examples" => Example::ALL
+                .into_iter()
+                .map(|example| (example.title(), "", !self.busy))
+                .collect(),
             "CREATE" if self.mode == Mode::Sketch => vec![
                 ("Line", "L", true),
                 ("2-Point Rectangle", "R", true),
@@ -2076,10 +2083,18 @@ impl FusionApp {
             if response.hovered() {
                 p.rect_filled(row, 0., C::from_rgb(66, 89, 113));
             }
+            let checked = (*label_text == "Use OCCT Kernel"
+                && self.document.backend == Backend::Occt)
+                || (*label_text == "Use Rust Analytic Kernel"
+                    && self.document.backend == Backend::Rust);
             label(
                 &p,
                 row.left_center() + vec2(12., 0.),
-                *label_text,
+                if checked {
+                    format!("✓ {label_text}")
+                } else {
+                    label_text.to_string()
+                },
                 12.,
                 if *enabled { TEXT } else { MUTED },
             );
@@ -2097,6 +2112,12 @@ impl FusionApp {
         if let Some(action) = action {
             self.menu = None;
             match action {
+                "Rust Engine Examples…" => self.menu = Some(("Rust Engine Examples", position)),
+                action if name == "Rust Engine Examples" => {
+                    if let Some(example) = Example::ALL.into_iter().find(|e| e.title() == action) {
+                        self.load_engine_example(example);
+                    }
+                }
                 "Horizontal / Vertical"
                 | "Coincident"
                 | "Concentric"
@@ -2119,7 +2140,11 @@ impl FusionApp {
                 "Save" => self.save(),
                 "Export…" => self.export(),
                 "Use OCCT Kernel" | "Use Rust Analytic Kernel" => {
-                    if !self.busy {
+                    if !self.busy
+                        && self.mode == Mode::Design
+                        && self.extrude.is_none()
+                        && self.modeling.is_none()
+                    {
                         let mut d = self.document.clone();
                         d.backend = if action == "Use OCCT Kernel" {
                             fission180_core::kernel::Backend::Occt
@@ -2818,13 +2843,16 @@ impl eframe::App for FusionApp {
                 self.bodies = bodies;
                 self.preview = kind == crate::worker::ResponseKind::Preview;
                 self.revision += 1;
+                self.display_backend = response
+                    .display_backend
+                    .expect("Display backend accompanies every accepted display");
             }
             self.save_path = response.save_path;
             self.dirty = response.dirty || (self.mode == Mode::Sketch && self.draft.is_some());
             self.can_undo = response.can_undo;
             self.can_redo = response.can_redo;
             self.error = response.error;
-            self.status = if self.error.is_none() && !self.bodies.is_empty() {
+            self.status = if self.error.is_none() {
                 format!(
                     "{} {} | Volume: {:.2} mm³",
                     self.bodies.len(),
@@ -2865,6 +2893,12 @@ impl eframe::App for FusionApp {
         self.shortcuts(ui.ctx());
         let r = ui.max_rect();
         let (w, h) = (r.width(), r.height());
+        if self.fit_pending && !self.busy {
+            if self.error.is_none() {
+                self.camera.fit(&self.mesh, rect(0., 140., w, h - 190.));
+            }
+            self.fit_pending = false;
+        }
         ui.set_clip_rect(r);
         if self.home {
             self.home(ui, w, h);
@@ -2890,6 +2924,16 @@ impl eframe::App for FusionApp {
             self.dimension_palette(ui, w);
         }
         self.menu(ui);
+        if !self.home {
+            let caption = format!(
+                "Engine: {}{}",
+                self.display_backend.label(),
+                if self.preview { " · Preview" } else { "" }
+            );
+            let rr = rect(300., h - 78., 245., 20.);
+            label(ui.painter(), rr.left_center(), caption, 12., MUTED);
+            ui.interact(rr,Id::unique("active-engine"),Sense::hover()).on_hover_text(if self.display_backend==Backend::Rust {"Independent Rust geometry engine (experimental). Extrude, prism Combine and same-cap pockets are supported within documented limits. Change engines in File."}else{"OpenCascade geometry engine. Change engines or load a Rust engine example in File."});
+        }
         if let Some(error) = &self.error {
             let p = ui.painter();
             let rr = rect(w * 0.5 - 240., h - 119., 480., 30.);
@@ -2911,6 +2955,8 @@ impl eframe::App for FusionApp {
                 if let Some(path) = self.capture.take() {
                     let ctx = ui.ctx().clone();
                     let close = self.close_after_capture;
+                    let report_path = self.capture_report.take();
+                    let report = serde_json::json!({"name":self.document.name,"document_backend":self.document.backend,"display_backend":self.display_backend,"body_count":self.bodies.len(),"volume_mm3":self.bodies.iter().map(|b|b.volume).sum::<f64>(),"area_mm2":self.bodies.iter().map(|b|b.surface_area).sum::<f64>(),"triangle_count":self.mesh.indices.len()/3,"bodies":self.bodies.iter().map(|b|serde_json::json!({"id":b.id,"backend":b.backend,"volume_mm3":b.volume,"area_mm2":b.surface_area,"bounds_mm":b.bounds})).collect::<Vec<_>>(),"preview":self.preview,"error":self.error,"dirty":self.dirty,"can_undo":self.can_undo,"native_pixels_per_point":ui.ctx().native_pixels_per_point()});
                     ui.ctx().request_screenshot(move |image| {
                         if let Some(parent) = path.parent() {
                             let _ = std::fs::create_dir_all(parent);
@@ -2924,6 +2970,17 @@ impl eframe::App for FusionApp {
                             image.height() as u32,
                             image::ColorType::Rgba8,
                         );
+                        if let Some(report_path) = report_path {
+                            let mut report = report;
+                            report["screenshot_pixels"] =
+                                serde_json::json!([image.width(), image.height()]);
+                            if let Some(parent) = report_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            if let Ok(data) = serde_json::to_vec_pretty(&report) {
+                                let _ = std::fs::write(report_path, data);
+                            }
+                        }
                         if close {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }

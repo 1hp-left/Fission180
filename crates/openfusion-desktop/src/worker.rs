@@ -1,3 +1,4 @@
+use fission180_core::kernel::Backend;
 use fission180_core::{BodyInfo, DisplayMesh, Document, Model, Result, Session, persistence};
 use std::{
     path::PathBuf,
@@ -6,6 +7,8 @@ use std::{
 
 pub enum Command {
     Replace(Document),
+    /// Undoable example load, detached from the previous file's save path.
+    Example(Document),
     Open(PathBuf),
     New,
     Save(PathBuf),
@@ -31,6 +34,7 @@ pub struct Response {
     pub document: Document,
     /// None retains the last valid display, including an earlier valid preview.
     pub display: Option<(DisplayMesh, Vec<BodyInfo>)>,
+    pub display_backend: Option<Backend>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub error: Option<String>,
@@ -62,11 +66,18 @@ impl Engine {
     ) -> Response {
         let start = std::time::Instant::now();
         let mut display = None;
+        let mut display_backend = None;
         let result = (|| -> Result<ResponseKind> {
             let kind = match command {
                 Command::Replace(d) => {
                     self.committed_mesh = self.session.replace_with_display(d, &mesh)?;
                     ResponseKind::Commit
+                }
+                Command::Example(d) => {
+                    self.committed_mesh = self.session.replace_design_with_display(d, &mesh)?;
+                    self.save_path = None;
+                    self.saved = Document::default();
+                    ResponseKind::Loaded
                 }
                 Command::Open(path) => {
                     let d = Document::from_json(&std::fs::read_to_string(&path)?)?;
@@ -108,6 +119,7 @@ impl Engine {
                 Command::Preview(d) => {
                     let (_, model) = Model::prepare(&d)?;
                     display = Some((mesh(&model)?, model.info()));
+                    display_backend = Some(d.backend);
                     ResponseKind::Preview
                 }
                 Command::ResetPreview => ResponseKind::Restore,
@@ -121,6 +133,7 @@ impl Engine {
                 ResponseKind::Commit | ResponseKind::Loaded | ResponseKind::Restore
             ) {
                 display = Some((self.committed_mesh.clone(), self.session.model.info()));
+                display_backend = Some(self.session.document.backend);
             }
             Ok(kind)
         })();
@@ -133,6 +146,7 @@ impl Engine {
             kind,
             document: self.session.document.clone(),
             display,
+            display_backend,
             can_undo: self.session.can_undo(),
             can_redo: self.session.can_redo(),
             error,
@@ -188,6 +202,163 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine_examples::Example;
+    fn volume(response: &Response) -> f64 {
+        response
+            .display
+            .as_ref()
+            .unwrap()
+            .1
+            .iter()
+            .map(|b| b.volume)
+            .sum()
+    }
+    #[test]
+    fn rust_examples_use_the_app_worker_and_keep_sources_save_paths_and_history_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("original.ofrust");
+        let mut engine = Engine::new();
+        engine.execute(1, Command::Replace(document()), Model::display_mesh);
+        engine.execute(2, Command::Save(original_path.clone()), Model::display_mesh);
+        let original_bytes = std::fs::read(&original_path).unwrap();
+        let original = engine.session.document.clone();
+        let lens = 200. * std::f64::consts::PI / 3. - 50. * 3f64.sqrt();
+        for example in Example::ALL {
+            let response = engine.execute(
+                3,
+                Command::Example(example.document().unwrap()),
+                Model::display_mesh,
+            );
+            assert_eq!(response.kind, ResponseKind::Loaded, "{:?}", response.error);
+            assert_eq!(response.display_backend, Some(Backend::Rust));
+            assert_eq!(response.document.backend, Backend::Rust);
+            assert!(response.save_path.is_none());
+            assert!(response.dirty && response.can_undo);
+            assert_eq!(std::fs::read(&original_path).unwrap(), original_bytes);
+            let (mesh, bodies) = response.display.as_ref().unwrap();
+            assert!(!mesh.indices.is_empty());
+            assert!(bodies.iter().all(|b| b.backend == Backend::Rust));
+            assert_eq!(mesh.face_ids.len(), mesh.indices.len() / 3);
+            assert!(mesh.face_ids.iter().all(Option::is_some));
+            let (count, expected) = match example {
+                Example::Notch => (1, 4000. - 62.5 * std::f64::consts::PI),
+                Example::Join => (1, 5. * (200. * std::f64::consts::PI - lens)),
+                Example::Intersect => (1, 5. * lens),
+                Example::Split => (2, 3800.),
+                Example::Annular => (2, 225. * std::f64::consts::PI),
+                Example::Pockets => (1, 36000. - 800. * std::f64::consts::PI + 3. * lens),
+            };
+            assert_eq!(bodies.len(), count);
+            assert!((volume(&response) - expected).abs() < 1e-5);
+            let reopened =
+                Session::new(Document::from_json(&response.document.to_json().unwrap()).unwrap())
+                    .unwrap();
+            assert!(
+                (reopened.model.info().iter().map(|b| b.volume).sum::<f64>() - expected).abs()
+                    < 1e-5
+            );
+        }
+        for _ in 0..Example::ALL.len() {
+            assert_ne!(
+                engine.execute(4, Command::Undo, Model::display_mesh).kind,
+                ResponseKind::Rejected
+            );
+        }
+        assert_eq!(engine.session.document, original);
+        assert_eq!(engine.session.document.backend, Backend::Occt);
+        let redo = engine.execute(5, Command::Redo, Model::display_mesh);
+        assert_eq!(redo.display_backend, Some(Backend::Rust));
+        let accepted = engine.session.document.clone();
+        let mut invalid = Example::Pockets.document().unwrap();
+        invalid.extrusions[2].distance = 4.;
+        invalid.sketches[2].origin[2] = 0.;
+        let rejected = engine.execute(6, Command::Example(invalid), Model::display_mesh);
+        assert_eq!(rejected.kind, ResponseKind::Rejected);
+        assert_eq!(rejected.document, accepted);
+        assert!(rejected.display.is_none());
+        assert!(rejected.display_backend.is_none());
+    }
+    #[test]
+    fn rust_preview_edit_cancel_and_rejection_retain_the_display_backend() {
+        let mut engine = Engine::new();
+        let d = Example::Pockets.document().unwrap();
+        let accepted = engine.execute(1, Command::Example(d), Model::display_mesh);
+        let accepted_volume = volume(&accepted);
+        let mut edit = accepted.document.clone();
+        edit.extrusions[2].distance = -4.;
+        let preview = engine.execute(2, Command::Preview(edit.clone()), Model::display_mesh);
+        assert_eq!(preview.kind, ResponseKind::Preview);
+        assert_eq!(preview.display_backend, Some(Backend::Rust));
+        assert_eq!(preview.document, accepted.document);
+        assert!(volume(&preview) > accepted_volume);
+        let restored = engine.execute(3, Command::ResetPreview, Model::display_mesh);
+        assert_eq!(restored.display_backend, Some(Backend::Rust));
+        assert!((volume(&restored) - accepted_volume).abs() < 1e-5);
+        let committed = engine.execute(4, Command::Replace(edit), Model::display_mesh);
+        assert_eq!(committed.kind, ResponseKind::Commit);
+        assert_eq!(committed.display_backend, Some(Backend::Rust));
+        let mut invalid = committed.document.clone();
+        invalid.sketches[2].origin[2] = 0.;
+        invalid.extrusions[2].distance = 4.;
+        let rejected = engine.execute(5, Command::Replace(invalid), Model::display_mesh);
+        assert_eq!(rejected.kind, ResponseKind::Rejected);
+        assert_eq!(rejected.document, committed.document);
+        assert!(rejected.display_backend.is_none());
+        assert!(rejected.display.is_none());
+        let undone = engine.execute(6, Command::Undo, Model::display_mesh);
+        assert!((volume(&undone) - accepted_volume).abs() < 1e-5);
+        let redone = engine.execute(7, Command::Redo, Model::display_mesh);
+        assert!((volume(&redone) - volume(&committed)).abs() < 1e-5);
+        // Empty previews still identify the executing engine, independently of
+        // the backend of the accepted document.
+        let preview = engine.execute(
+            8,
+            Command::Preview(Document::default()),
+            Model::display_mesh,
+        );
+        assert_eq!(preview.display_backend, Some(Backend::Occt));
+        assert_eq!(preview.document.backend, Backend::Rust);
+        assert!(preview.display.unwrap().1.is_empty());
+    }
+    #[test]
+    fn failed_backend_switch_retains_the_occt_document_and_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("occt.ofrust");
+        let mut engine = Engine::new();
+        let mut d = document();
+        let occt = engine.execute(0, Command::Replace(d.clone()), Model::display_mesh);
+        let mut rust = d.clone();
+        rust.backend = Backend::Rust;
+        let switched = engine.execute(0, Command::Replace(rust), Model::display_mesh);
+        assert_eq!(switched.kind, ResponseKind::Commit);
+        assert_eq!(switched.display_backend, Some(Backend::Rust));
+        assert!((volume(&switched) - volume(&occt)).abs() < 1e-5);
+        let undone = engine.execute(0, Command::Undo, Model::display_mesh);
+        assert_eq!(undone.display_backend, Some(Backend::Occt));
+        d.push_feature(fission180_core::features::Feature {
+            id: 8,
+            name: "Fillet".into(),
+            target: Some(3),
+            outputs: vec![],
+            kind: fission180_core::features::FeatureKind::Fillet {
+                radius: "1 mm".into(),
+            },
+        })
+        .unwrap();
+        let accepted = engine.execute(1, Command::Replace(d), Model::display_mesh);
+        assert_eq!(accepted.kind, ResponseKind::Commit);
+        engine.execute(2, Command::Save(path.clone()), Model::display_mesh);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut rust = accepted.document.clone();
+        rust.backend = Backend::Rust;
+        let rejected = engine.execute(3, Command::Replace(rust), Model::display_mesh);
+        assert_eq!(rejected.kind, ResponseKind::Rejected);
+        assert_eq!(rejected.document.backend, Backend::Occt);
+        assert!(rejected.error.unwrap().contains("unsupported"));
+        assert_eq!(rejected.save_path, Some(path.clone()));
+        assert!(!rejected.dirty);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
     fn document() -> Document {
         let d = Document::from_json(include_str!(
             "../../../examples/fusion-reference-extrude.ofrust"
@@ -245,6 +416,15 @@ mod tests {
         let r = engine.execute(2, Command::Replace(edit.clone()), fail);
         assert_eq!(r.document, document());
         assert!(r.display.is_none());
+        let r = engine.execute(
+            2,
+            Command::Example(Example::Pockets.document().unwrap()),
+            fail,
+        );
+        assert_eq!(r.kind, ResponseKind::Rejected);
+        assert_eq!(r.document, document());
+        assert!(r.display.is_none());
+        assert!(r.display_backend.is_none());
         let r = engine.execute(3, Command::Preview(edit), Model::display_mesh);
         assert_eq!(r.kind, ResponseKind::Preview);
         assert_eq!(r.document, document());

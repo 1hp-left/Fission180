@@ -973,6 +973,19 @@ impl Session {
         self.commit(document, model);
         Ok(display)
     }
+    /// Replace an entire design, retaining the previous document for Undo.
+    /// Unrelated designs have their own identity namespaces. Ordinary feature
+    /// edits must use replace_with_display and its ancestry checks instead.
+    pub fn replace_design_with_display(
+        &mut self,
+        document: Document,
+        mesh: impl FnOnce(&Model) -> Result<DisplayMesh>,
+    ) -> Result<DisplayMesh> {
+        let (document, model) = Model::prepare(&document)?;
+        let display = mesh(&model)?;
+        self.commit(document, model);
+        Ok(display)
+    }
     fn check_output_ancestry(&self, model: &Model) -> Result<()> {
         for old in &self.model.bodies {
             let Some(new) = model.bodies.iter().find(|b| b.id == old.id) else {
