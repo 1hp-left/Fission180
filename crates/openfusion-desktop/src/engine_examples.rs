@@ -1,6 +1,6 @@
 //! Editable designs for exercising the native engine through the ordinary app worker.
 use fission180_core::{
-    Document, Extrusion, Operation, Profile, Result, Sketch,
+    Document, Extrusion, Operation, Plane, Profile, Result, Sketch,
     features::{Feature, FeatureKind},
     kernel::Backend,
 };
@@ -15,9 +15,11 @@ pub enum Example {
     Pockets,
     Breakthrough,
     UnequalJoin,
+    CrossAxis,
+    Cavity,
 }
 impl Example {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Notch,
         Self::Join,
         Self::Intersect,
@@ -26,6 +28,8 @@ impl Example {
         Self::Pockets,
         Self::Breakthrough,
         Self::UnequalJoin,
+        Self::CrossAxis,
+        Self::Cavity,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -37,6 +41,8 @@ impl Example {
             Self::Pockets => "pockets",
             Self::Breakthrough => "breakthrough",
             Self::UnequalJoin => "boss",
+            Self::CrossAxis => "cross-axis",
+            Self::Cavity => "cavity",
         }
     }
     pub fn title(self) -> &'static str {
@@ -49,12 +55,17 @@ impl Example {
             Self::Pockets => "Overlapping blind pockets",
             Self::Breakthrough => "Opposite-cap breakthrough pockets",
             Self::UnequalJoin => "Unequal-height circle Join",
+            Self::CrossAxis => "Cross-axis triangular Cut",
+            Self::Cavity => "Enclosed planar cavity",
         }
     }
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|e| e.key() == key)
     }
     pub fn document(self) -> Result<Document> {
+        if matches!(self, Self::CrossAxis | Self::Cavity) {
+            return planar_example(self);
+        }
         let disk = |center, radius| Profile::Circle { center, radius };
         let rectangle = |a, b| Profile::Rectangle { a, b };
         let (outer, tool, holes, operation, combine) = match self {
@@ -100,6 +111,7 @@ impl Example {
                 Operation::Cut,
                 false,
             ),
+            Self::CrossAxis | Self::Cavity => unreachable!(),
         };
         let sketch =
             |id, name: &str, profile: Profile, holes: Vec<Profile>, z: f64| -> Result<Sketch> {
@@ -215,6 +227,60 @@ impl Example {
         d.validate()?;
         Ok(d)
     }
+}
+fn planar_example(example: Example) -> Result<Document> {
+    let mut d = Document {
+        name: format!("Rust engine — {}", example.title()),
+        backend: Backend::Rust,
+        ..Default::default()
+    };
+    let mut base = Sketch {
+        id: 1,
+        name: "Base profile".into(),
+        ..Default::default()
+    };
+    base.add_profile(Profile::Rectangle {
+        a: [0.; 2],
+        b: [40., 20.],
+    })?;
+    let mut tool = Sketch {
+        id: 4,
+        name: "Tool profile".into(),
+        ..Default::default()
+    };
+    let depth = if example == Example::CrossAxis {
+        tool.plane = Plane::XZ;
+        tool.origin = [0., 25., 0.];
+        tool.add_profile(Profile::Polygon {
+            points: vec![[10., -2.], [30., -2.], [20., 8.]],
+        })?;
+        30.
+    } else {
+        tool.origin = [0., 0., 3.];
+        tool.add_profile(Profile::Rectangle {
+            a: [10., 5.],
+            b: [30., 15.],
+        })?;
+        4.
+    };
+    d.sketches = vec![base, tool];
+    d.extrusions = vec![
+        extrusion(2, 1, 3, 10., Operation::NewBody, "Base extrusion"),
+        extrusion(5, 4, 6, depth, Operation::NewBody, "Tool extrusion"),
+    ];
+    d.push_feature(Feature {
+        id: 7,
+        name: example.title().into(),
+        target: Some(3),
+        outputs: vec![],
+        kind: FeatureKind::Combine {
+            tool_body: 6,
+            operation: Operation::Cut,
+            keep_tool: false,
+        },
+    })?;
+    d.validate()?;
+    Ok(d)
 }
 fn extrusion(
     id: u64,

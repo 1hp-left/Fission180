@@ -399,7 +399,7 @@ impl FusionApp {
                 app.load_engine_example(example);
             } else {
                 app.error = Some(
-                    "Choose an engine example: notch, join, intersect, split, annular, pockets, breakthrough, boss"
+                    "Choose an engine example: notch, join, intersect, split, annular, pockets, breakthrough, boss, cross-axis, cavity"
                         .into(),
                 );
             }
@@ -2956,7 +2956,7 @@ impl eframe::App for FusionApp {
                     let ctx = ui.ctx().clone();
                     let close = self.close_after_capture;
                     let report_path = self.capture_report.take();
-                    let report = serde_json::json!({"name":self.document.name,"document_backend":self.document.backend,"display_backend":self.display_backend,"body_count":self.bodies.len(),"volume_mm3":self.bodies.iter().map(|b|b.volume).sum::<f64>(),"area_mm2":self.bodies.iter().map(|b|b.surface_area).sum::<f64>(),"triangle_count":self.mesh.indices.len()/3,"bodies":self.bodies.iter().map(|b|serde_json::json!({"id":b.id,"backend":b.backend,"volume_mm3":b.volume,"area_mm2":b.surface_area,"bounds_mm":b.bounds})).collect::<Vec<_>>(),"preview":self.preview,"error":self.error,"dirty":self.dirty,"can_undo":self.can_undo,"native_pixels_per_point":ui.ctx().native_pixels_per_point()});
+                    let report = serde_json::json!({"name":self.document.name,"document_backend":self.document.backend,"display_backend":self.display_backend,"body_count":self.bodies.len(),"volume_mm3":self.bodies.iter().map(|b|b.volume).sum::<f64>(),"area_mm2":self.bodies.iter().map(|b|b.surface_area).sum::<f64>(),"triangle_count":self.mesh.indices.len()/3,"bodies":self.bodies.iter().map(|b|serde_json::json!({"id":b.id,"backend":b.backend,"volume_mm3":b.volume,"area_mm2":b.surface_area,"bounds_mm":b.bounds,"boundary_shells":b.boundary_shells,"native_topology_validated":b.boundary_shells.map(|_|true)})).collect::<Vec<_>>(),"preview":self.preview,"error":self.error,"dirty":self.dirty,"can_undo":self.can_undo,"native_pixels_per_point":ui.ctx().native_pixels_per_point()});
                     ui.ctx().request_screenshot(move |image| {
                         if let Some(parent) = path.parent() {
                             let _ = std::fs::create_dir_all(parent);

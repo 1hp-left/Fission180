@@ -676,6 +676,9 @@ pub struct BodyInfo {
     pub surface_area: f64,
     pub bounds: [[f64; 3]; 2],
     pub backend: Backend,
+    /// Native analytic boundary shells, including interior void boundaries.
+    /// The OCCT adapter does not currently expose a shell inventory.
+    pub boundary_shells: Option<usize>,
 }
 impl Model {
     pub fn build(document: &Document) -> Result<Self> {
@@ -868,6 +871,10 @@ impl Model {
                 surface_area: b.solid.area(),
                 bounds: b.solid.bounds(),
                 backend: b.solid.backend(),
+                boundary_shells: match &b.solid {
+                    Geometry::Rust(s) => Some(s.topology().shell_count()),
+                    Geometry::Occt(_) => None,
+                },
             })
             .collect()
     }

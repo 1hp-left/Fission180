@@ -32,7 +32,8 @@ pub struct Response {
     pub id: u64,
     pub kind: ResponseKind,
     pub document: Document,
-    /// None retains the last valid display, including an earlier valid preview.
+    /// Invalid previews retain the last valid preview. Rejected commits carry
+    /// the accepted display so closing the editor cannot strand a draft onscreen.
     pub display: Option<(DisplayMesh, Vec<BodyInfo>)>,
     pub display_backend: Option<Backend>,
     pub can_undo: bool,
@@ -65,6 +66,7 @@ impl Engine {
         mesh: impl Fn(&Model) -> Result<DisplayMesh>,
     ) -> Response {
         let start = std::time::Instant::now();
+        let restore_on_rejection = matches!(&command, Command::Replace(_));
         let mut display = None;
         let mut display_backend = None;
         let result = (|| -> Result<ResponseKind> {
@@ -139,7 +141,13 @@ impl Engine {
         })();
         let (kind, error) = match result {
             Ok(k) => (k, None),
-            Err(e) => (ResponseKind::Rejected, Some(e.to_string())),
+            Err(e) => {
+                if restore_on_rejection {
+                    display = Some((self.committed_mesh.clone(), self.session.model.info()));
+                    display_backend = Some(self.session.document.backend);
+                }
+                (ResponseKind::Rejected, Some(e.to_string()))
+            }
         };
         Response {
             id,
@@ -214,6 +222,48 @@ mod tests {
             .sum()
     }
     #[test]
+    fn rejected_ok_after_valid_topology_preview_restores_the_accepted_display_and_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cavity.ofrust");
+        let mut engine = Engine::new();
+        let accepted = engine.execute(
+            1,
+            Command::Example(Example::Cavity.document().unwrap()),
+            Model::display_mesh,
+        );
+        engine.execute(2, Command::Save(path.clone()), Model::display_mesh);
+        let saved = std::fs::read(&path).unwrap();
+        let accepted_vertices = accepted.display.as_ref().unwrap().0.vertices.clone();
+        for mesh_failure in [false, true] {
+            let mut edit = accepted.document.clone();
+            edit.extrusions[1].distance = if mesh_failure { 3. } else { 8. };
+            let preview = engine.execute(3, Command::Preview(edit.clone()), Model::display_mesh);
+            assert_eq!(preview.kind, ResponseKind::Preview);
+            assert!((volume(&preview) - 7200.).abs() > 1.);
+            let rejected = if mesh_failure {
+                engine.execute(4, Command::Replace(edit), |_| {
+                    Err(fission180_core::Error::Invalid(
+                        "injected planar display failure".into(),
+                    ))
+                })
+            } else {
+                engine.execute(4, Command::Replace(edit), Model::display_mesh)
+            };
+            assert_eq!(rejected.kind, ResponseKind::Rejected);
+            assert_eq!(rejected.document, accepted.document);
+            assert_eq!(rejected.save_path, Some(path.clone()));
+            assert!(!rejected.dirty && rejected.can_undo && !rejected.can_redo);
+            assert_eq!(rejected.display_backend, Some(Backend::Rust));
+            assert_eq!(
+                rejected.display.as_ref().unwrap().0.vertices,
+                accepted_vertices
+            );
+            assert!((volume(&rejected) - 7200.).abs() < 1e-5);
+            engine.execute(5, Command::Save(path.clone()), Model::display_mesh);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+        }
+    }
+    #[test]
     fn rust_examples_use_the_app_worker_and_keep_sources_save_paths_and_history_safe() {
         let dir = tempfile::tempdir().unwrap();
         let original_path = dir.path().join("original.ofrust");
@@ -249,6 +299,8 @@ mod tests {
                 Example::Pockets => (1, 36000. - 800. * std::f64::consts::PI + 3. * lens),
                 Example::Breakthrough => (1, 36000. - 1200. * std::f64::consts::PI + 2. * lens),
                 Example::UnequalJoin => (1, 2000. * std::f64::consts::PI - 5. * lens),
+                Example::CrossAxis => (1, 6720.),
+                Example::Cavity => (1, 7200.),
             };
             assert_eq!(bodies.len(), count);
             assert!((volume(&response) - expected).abs() < 1e-5);
@@ -305,8 +357,8 @@ mod tests {
         let rejected = engine.execute(5, Command::Replace(invalid), Model::display_mesh);
         assert_eq!(rejected.kind, ResponseKind::Rejected);
         assert_eq!(rejected.document, committed.document);
-        assert!(rejected.display_backend.is_none());
-        assert!(rejected.display.is_none());
+        assert_eq!(rejected.display_backend, Some(Backend::Rust));
+        assert!((volume(&rejected) - volume(&committed)).abs() < 1e-5);
         let undone = engine.execute(6, Command::Undo, Model::display_mesh);
         assert!((volume(&undone) - accepted_volume).abs() < 1e-5);
         let redone = engine.execute(7, Command::Redo, Model::display_mesh);
@@ -417,7 +469,8 @@ mod tests {
         };
         let r = engine.execute(2, Command::Replace(edit.clone()), fail);
         assert_eq!(r.document, document());
-        assert!(r.display.is_none());
+        assert_eq!(r.display.as_ref().unwrap().0.vertices, vertices);
+        assert_eq!(r.display_backend, Some(Backend::Occt));
         let r = engine.execute(
             2,
             Command::Example(Example::Pockets.document().unwrap()),
@@ -513,6 +566,8 @@ mod tests {
         for (example, index, value) in [
             (Example::Breakthrough, 2, 5.5),
             (Example::UnequalJoin, 1, 9.),
+            (Example::CrossAxis, 0, 9.),
+            (Example::Cavity, 1, 3.),
         ] {
             let mut engine = Engine::new();
             let initial = engine.execute(
@@ -550,7 +605,11 @@ mod tests {
             let rejected = engine.execute(6, Command::Replace(candidate), fail);
             assert_eq!(rejected.kind, ResponseKind::Rejected);
             assert_eq!(rejected.document, committed.document);
-            assert!(rejected.display.is_none());
+            assert_eq!(
+                rejected.display.as_ref().unwrap().0.vertices,
+                committed.display.as_ref().unwrap().0.vertices
+            );
+            assert!((volume(&rejected) - edited_volume).abs() < 1e-5);
             assert_eq!(rejected.save_path, Some(path.clone()));
             let mut invalid = committed.document.clone();
             invalid.extrusions[index].distance = 0.;

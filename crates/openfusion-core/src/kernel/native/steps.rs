@@ -105,6 +105,9 @@ pub(super) fn boolean(
     op: Operation,
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
+    if a.general.is_some() || b.general.is_some() {
+        return invalid("General planar B-reps have no authoritative occupied sections");
+    }
     if a.input.plane != b.input.plane {
         return invalid(
             "Rust section Boolean requires parallel principal axes; no OCCT fallback occurred",

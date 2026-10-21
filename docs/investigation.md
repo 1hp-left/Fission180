@@ -1,8 +1,18 @@
 # Fusion investigation and reconstruction index
 
-Started: 2026-10-18. Updated: 2026-10-20. Target: Autodesk Fusion, previously called Fusion 360. User-selected first scope: sketching and solid modeling, within a broader full-product parity goal.
+Started: 2026-10-18. Updated: 2026-10-21. Target: Autodesk Fusion, previously called Fusion 360. User-selected first scope: sketching and solid modeling, within a broader full-product parity goal.
 
 ## Current status: installed Fusion and native Rust reconstruction
+
+[Planar-face 3D Booleans and cavity shells](planar-3d-2026-10-21.md) adds
+independent nonparallel polygonal Cut/Join/Intersect, chained general planar
+results, shell-aware cavities and nested material islands. Analytic B-rep
+measurements, explicit source ancestry, v5 output ordering, transactional replay
+and two editable native examples are verified. All 121 workspace tests, the
+release build and eleven corpora (2,220 saved/reopened documents) pass; native
+timeline edits, rejected-edit display rollback and Save/reopen were exercised.
+Curved nonparallel intersections remain unsupported. This supersedes earlier
+planar cavity/nonparallel restrictions without establishing Fusion parity.
 
 [Generalized same-axis solid Booleans](axial-booleans-2026-10-20.md) extends
 occupied sections to Cut/Join/Intersect of unequal-height and already stepped

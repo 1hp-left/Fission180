@@ -41,6 +41,20 @@ Use analytic tolerances appropriate to each operation and unit; record them with
 
 These are pending comparison protocols, not completed tests. Link each completed scenario and its evidence in [investigation.md](investigation.md). Native analysis details are in [rea-native.md](rea-native.md).
 
+## Independent engine phase — 2026-10-21
+
+[Planar-face 3D Booleans](planar-3d-2026-10-21.md) support nonparallel polygonal
+extrusions, line-only stepped inputs and further operations on general planar
+B-reps. One material solid can own multiple oriented boundary shells; islands
+inside cavities are separate bodies. Analytic mass properties, source lineage,
+contact semantics, v5 ordering and failed-commit display restoration are checked
+independently. Two new native examples use ordinary editable features. All 121
+tests and 2,220 corpus documents pass; native preview, Cancel/OK, Undo/Redo,
+topology-change rejection and Save/reopen are recorded. Plane–cylinder and
+cylinder–cylinder intersections, arbitrary rotated sketch supports and production
+Rust STEP exchange remain outside this phase. Existing display seams, occlusion
+and unmatched Fusion workflow/visual fidelity remain open.
+
 ## Independent engine phase — 2026-10-20
 
 [Generalized axial Booleans](axial-booleans-2026-10-20.md) now support parallel

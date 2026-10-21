@@ -4,6 +4,7 @@ use super::ExtrudeInput;
 use crate::{DisplayMesh, EPS, Operation, Plane, Profile, Result, invalid};
 use serde::{Deserialize, Serialize};
 mod cuts;
+mod faces;
 mod prisms;
 mod steps;
 
@@ -20,12 +21,39 @@ pub const POLICY: Tolerance = Tolerance {
     angular_rad: 1e-10,
     maximum_mm: 1_000_000.,
 };
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TopologyId {
     pub body: u64,
     pub feature: u64,
     pub region: u64,
     pub local: u64,
+}
+/// Original face identity and semantic transform instances, never coordinates.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct FaceSource {
+    pub original: TopologyId,
+    pub occurrences: Vec<(u64, u64)>,
+}
+/// Inspectable ancestry of a straight trim source. Occurrences on a planar
+/// span compose with these original sources through subsequent translations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum BoundarySource {
+    Edge(TopologyId),
+    PlaneIntersection(
+        std::collections::BTreeSet<FaceSource>,
+        std::collections::BTreeSet<FaceSource>,
+    ),
+    FiniteGuard(
+        std::collections::BTreeSet<FaceSource>,
+        std::collections::BTreeSet<FaceSource>,
+        usize,
+    ),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Representation {
+    UniformExtrusion,
+    OccupiedSections,
+    PlanarFaces,
 }
 #[derive(Debug, Clone)]
 pub enum Curve {
@@ -401,9 +429,19 @@ impl Brep {
             }
         }
         if seen.len() != self.faces.len() {
-            return invalid("Rust B-rep has disconnected face shells");
+            faces::validate_shells(self)?;
+        }
+        if faces::supported(self) {
+            faces::validate_geometry(self)?;
+            if self.shell_count() == 1 && faces::measurements(self).0 <= EPS.powi(3) {
+                return invalid("Rust outer planar shell must have positive signed volume");
+            }
         }
         Ok(())
+    }
+    /// Connected boundary shells. A cavity shell is not another material body.
+    pub fn shell_count(&self) -> usize {
+        faces::shells(self).len()
     }
 }
 #[derive(Debug, Clone)]
@@ -430,6 +468,7 @@ pub struct SectionSignature {
 pub enum OutputSignature {
     Planar(Vec<Vec<crate::planar::SpanKey>>),
     Sections(Vec<SectionSignature>),
+    Faces(Vec<u64>),
 }
 #[derive(Debug, Clone)]
 pub struct NativeSolid {
@@ -441,6 +480,7 @@ pub struct NativeSolid {
     planar_named: bool,
     legacy_output_order: bool,
     stepped: Option<steps::Stepped>,
+    general: Option<faces::General>,
     pub provenance: Vec<Provenance>,
 }
 fn measure(profile: &Profile) -> (f64, f64) {
@@ -464,6 +504,9 @@ impl NativeSolid {
     ) -> Result<Self> {
         for n in offset {
             crate::number(n)?;
+        }
+        if self.general.is_some() {
+            return faces::translated(self, offset, feature, instance);
         }
         let mut input = self.input.clone();
         for (v, o) in input.origin.iter_mut().zip(offset) {
@@ -532,9 +575,24 @@ impl NativeSolid {
     pub fn topology(&self) -> &Brep {
         &self.topology
     }
+    pub fn representation(&self) -> Representation {
+        if self.general.is_some() {
+            Representation::PlanarFaces
+        } else if self.stepped.is_some() {
+            Representation::OccupiedSections
+        } else {
+            Representation::UniformExtrusion
+        }
+    }
+    pub fn face_ancestry(&self) -> Option<&[std::collections::BTreeSet<FaceSource>]> {
+        self.general.as_ref().map(|g| g.roots.as_slice())
+    }
+    pub fn boundary_ancestry(&self) -> Option<&std::collections::BTreeMap<u64, BoundarySource>> {
+        self.general.as_ref().map(|g| &g.sources.entries)
+    }
     /// Uniform solids alone have one authoritative planar region.
     pub fn planar_region(&self) -> Option<&crate::planar::Region> {
-        self.stepped.is_none().then_some(&self.planar)
+        (self.stepped.is_none() && self.general.is_none()).then_some(&self.planar)
     }
     /// Exact occupied sections for stepped solids; axial coordinates are signed
     /// millimetres along the principal plane normal in world coordinates.
@@ -548,7 +606,9 @@ impl NativeSolid {
         })
     }
     pub fn output_signature(&self) -> Option<OutputSignature> {
-        if let Some(steps) = &self.stepped {
+        if let Some(general) = &self.general {
+            Some(OutputSignature::Faces(general.signature.clone()))
+        } else if let Some(steps) = &self.stepped {
             Some(OutputSignature::Sections(steps.signature.clone()))
         } else {
             self.planar_named
@@ -858,6 +918,7 @@ impl NativeSolid {
             planar_named: false,
             legacy_output_order: false,
             stepped: None,
+            general: None,
             provenance: vec![Provenance {
                 feature,
                 operation: Operation::NewBody,
@@ -866,6 +927,9 @@ impl NativeSolid {
         })
     }
     pub fn volume(&self) -> f64 {
+        if self.general.is_some() {
+            return faces::measurements(&self.topology).0;
+        }
         if let Some(steps) = &self.stepped {
             return steps.volume;
         }
@@ -873,6 +937,9 @@ impl NativeSolid {
             * self.input.distance.abs()
     }
     pub fn area(&self) -> f64 {
+        if self.general.is_some() {
+            return faces::measurements(&self.topology).1;
+        }
         if let Some(steps) = &self.stepped {
             return steps.area;
         }
@@ -882,6 +949,9 @@ impl NativeSolid {
         2. * (a - holes_area) + (p + holes_perimeter) * self.input.distance.abs()
     }
     pub fn bounds(&self) -> [[f64; 3]; 2] {
+        if self.general.is_some() {
+            return faces::bounds(&self.topology);
+        }
         if let Some(steps) = &self.stepped {
             return steps.bounds(&self.input);
         }
@@ -906,7 +976,9 @@ impl NativeSolid {
         bounds
     }
     pub fn mesh(&self, segments: usize) -> Result<DisplayMesh> {
-        if let Some(steps) = &self.stepped {
+        if self.general.is_some() {
+            faces::mesh(&self.topology, segments)
+        } else if let Some(steps) = &self.stepped {
             steps.mesh(&self.topology, segments)
         } else {
             self.mesh_prism(segments)
@@ -1116,7 +1188,14 @@ pub fn boolean(
     let bb = b.bounds();
     let disjoint = (0..3)
         .any(|i| aa[1][i] < bb[0][i] - POLICY.linear_mm || bb[1][i] < aa[0][i] - POLICY.linear_mm);
-    let mut result = if let Some(solids) = prisms::boolean(a, b, operation, feature)? {
+    let planar_faces = faces::supported(&a.topology) && faces::supported(&b.topology);
+    let enclosed = (0..3).all(|i| bb[0][i] > aa[0][i] + EPS && bb[1][i] < aa[1][i] - EPS);
+    let general = a.general.is_some()
+        || b.general.is_some()
+        || (planar_faces && (a.input.plane != b.input.plane || enclosed));
+    let mut result = if general {
+        faces::boolean(a, b, operation, feature)?
+    } else if let Some(solids) = prisms::boolean(a, b, operation, feature)? {
         solids
     } else if a.input.plane == b.input.plane {
         steps::boolean(a, b, operation, feature)?
@@ -1169,7 +1248,9 @@ fn box_boolean(
     operation: Operation,
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
-    if !prisms::rectangular(&a.input.outer)
+    if a.general.is_some()
+        || b.general.is_some()
+        || !prisms::rectangular(&a.input.outer)
         || a.stepped.is_some()
         || b.stepped.is_some()
         || !a.input.holes.is_empty()

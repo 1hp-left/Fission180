@@ -469,6 +469,8 @@ mod tests {
         for (example, index, value) in [
             (crate::engine_examples::Example::Breakthrough, 2, "5.5 mm"),
             (crate::engine_examples::Example::UnequalJoin, 1, "9 mm"),
+            (crate::engine_examples::Example::CrossAxis, 0, "9 mm"),
+            (crate::engine_examples::Example::Cavity, 1, "3 mm"),
         ] {
             let mut session = Session::new(example.document().unwrap()).unwrap();
             let original = session.document.extrusions[index].clone();

@@ -66,7 +66,12 @@ pub(super) fn boolean(
     op: Operation,
     feature: u64,
 ) -> Result<Option<Vec<NativeSolid>>> {
-    if a.stepped.is_some() || b.stepped.is_some() || a.input.plane != b.input.plane {
+    if a.general.is_some()
+        || b.general.is_some()
+        || a.stepped.is_some()
+        || b.stepped.is_some()
+        || a.input.plane != b.input.plane
+    {
         return Ok(None);
     }
     let aa = cuts::interval(&a.input);
