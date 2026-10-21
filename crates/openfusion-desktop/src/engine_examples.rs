@@ -13,15 +13,19 @@ pub enum Example {
     Split,
     Annular,
     Pockets,
+    Breakthrough,
+    UnequalJoin,
 }
 impl Example {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Notch,
         Self::Join,
         Self::Intersect,
         Self::Split,
         Self::Annular,
         Self::Pockets,
+        Self::Breakthrough,
+        Self::UnequalJoin,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -31,6 +35,8 @@ impl Example {
             Self::Split => "split",
             Self::Annular => "annular",
             Self::Pockets => "pockets",
+            Self::Breakthrough => "breakthrough",
+            Self::UnequalJoin => "boss",
         }
     }
     pub fn title(self) -> &'static str {
@@ -41,6 +47,8 @@ impl Example {
             Self::Split => "Split cut — two bodies",
             Self::Annular => "Annular cut — two bodies",
             Self::Pockets => "Overlapping blind pockets",
+            Self::Breakthrough => "Opposite-cap breakthrough pockets",
+            Self::UnequalJoin => "Unequal-height circle Join",
         }
     }
     pub fn from_key(key: &str) -> Option<Self> {
@@ -57,7 +65,7 @@ impl Example {
                 Operation::Cut,
                 false,
             ),
-            Self::Join => (
+            Self::Join | Self::UnequalJoin => (
                 disk([-5., 0.], 10.),
                 disk([5., 0.], 10.),
                 vec![],
@@ -85,7 +93,7 @@ impl Example {
                 Operation::Cut,
                 false,
             ),
-            Self::Pockets => (
+            Self::Pockets | Self::Breakthrough => (
                 rectangle([-30.; 2], [30.; 2]),
                 disk([-5., 0.], 10.),
                 vec![],
@@ -107,6 +115,7 @@ impl Example {
                 }
                 Ok(s)
             };
+        let pockets = matches!(self, Self::Pockets | Self::Breakthrough);
         let mut d = Document {
             name: format!("Rust engine — {}", self.title()),
             backend: Backend::Rust,
@@ -116,20 +125,30 @@ impl Example {
             .push(sketch(1, "Base profile", outer, vec![], 0.)?);
         d.sketches.push(sketch(
             4,
-            if self == Self::Pockets {
+            if pockets {
                 "Pocket 1 profile"
             } else {
                 "Tool profile"
             },
             tool,
             holes,
-            if self == Self::Pockets { 10. } else { 0. },
+            if pockets {
+                10.
+            } else if self == Self::UnequalJoin {
+                5.
+            } else {
+                0.
+            },
         )?);
         d.extrusions.push(extrusion(
             2,
             1,
             3,
-            if self == Self::Pockets { 10. } else { 5. },
+            if pockets || self == Self::UnequalJoin {
+                10.
+            } else {
+                5.
+            },
             Operation::NewBody,
             "Base extrusion",
         ));
@@ -137,13 +156,23 @@ impl Example {
             5,
             4,
             if combine { 6 } else { 3 },
-            if self == Self::Pockets { -3. } else { 5. },
+            if self == Self::Breakthrough {
+                -6.
+            } else if pockets {
+                -3.
+            } else if self == Self::UnequalJoin {
+                10.
+            } else {
+                5.
+            },
             if combine {
                 Operation::NewBody
             } else {
                 operation
             },
-            if self == Self::Pockets {
+            if self == Self::Breakthrough {
+                "Top pocket — 6 mm"
+            } else if pockets {
                 "Pocket 1 — 3 mm"
             } else {
                 "Tool extrusion"
@@ -162,16 +191,26 @@ impl Example {
                 },
             })?;
         }
-        if self == Self::Pockets {
+        if pockets {
             d.sketches.push(sketch(
                 7,
                 "Pocket 2 profile",
                 disk([5., 0.], 10.),
                 vec![],
-                10.,
+                if self == Self::Breakthrough { 0. } else { 10. },
             )?);
-            d.extrusions
-                .push(extrusion(8, 7, 3, -5., Operation::Cut, "Pocket 2 — 5 mm"));
+            d.extrusions.push(extrusion(
+                8,
+                7,
+                3,
+                if self == Self::Breakthrough { 6. } else { -5. },
+                Operation::Cut,
+                if self == Self::Breakthrough {
+                    "Bottom pocket — 6 mm"
+                } else {
+                    "Pocket 2 — 5 mm"
+                },
+            ));
         }
         d.validate()?;
         Ok(d)

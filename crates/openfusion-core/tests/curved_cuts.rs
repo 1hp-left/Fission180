@@ -271,7 +271,11 @@ fn disjoint_pockets_through_holes_translation_and_body_outcomes_preserve_geometr
             .is_empty()
     );
     // Equal rectangular envelopes do not make a pocketed body and a box equal.
-    assert!(fission180_core::kernel::native::boolean(&two, &a, Operation::Join, 13).is_err());
+    let filled = fission180_core::kernel::native::boolean(&two, &a, Operation::Join, 13).unwrap();
+    assert_eq!(filled.len(), 1);
+    close(filled[0].volume(), a.volume());
+    close(filled[0].area(), a.area());
+    filled[0].topology().validate().unwrap();
 }
 #[test]
 fn curved_target_with_existing_hole_and_bound_topology_accepts_disjoint_blind_cut() {
@@ -329,7 +333,7 @@ fn curved_target_with_existing_hole_and_bound_topology_accepts_disjoint_blind_cu
     assert!(corrupt.validate().is_err());
 }
 #[test]
-fn contained_cut_rejects_enclosed_sidewall_interactions_and_accepts_regular_overlaps() {
+fn contained_cut_rejects_enclosed_and_tangent_voids_and_accepts_sidewall_crossings() {
     let a = NativeSolid::extrude(block()).unwrap();
     for (profile, start, distance) in [
         (semicircle(), 2., 3.), // enclosed cavity
@@ -354,15 +358,29 @@ fn contained_cut_rejects_enclosed_sidewall_interactions_and_accepts_regular_over
         b.feature_id = 5;
         b.origin[2] = start;
         b.distance = distance;
-        assert!(
-            fission180_core::kernel::native::boolean(
-                &a,
-                &NativeSolid::extrude(b).unwrap(),
-                Operation::Cut,
-                5
-            )
-            .is_err()
+        let result = fission180_core::kernel::native::boolean(
+            &a,
+            &NativeSolid::extrude(b.clone()).unwrap(),
+            Operation::Cut,
+            5,
         );
+        if start == 7.
+            && matches!(
+                b.outer,
+                Profile::Circle {
+                    center: [29., 0.],
+                    ..
+                }
+            )
+        {
+            let result = result.unwrap();
+            let oracle = occt_cut_test_adapter(&block(), &b);
+            close(result[0].volume(), oracle[0].volume());
+            close(result[0].area(), oracle[0].area());
+            result[0].topology().validate().unwrap();
+        } else {
+            assert!(result.is_err());
+        }
     }
     let mut b = input(semicircle());
     b.feature_id = 5;

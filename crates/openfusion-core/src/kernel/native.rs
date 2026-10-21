@@ -412,12 +412,31 @@ pub struct Provenance {
     pub operation: Operation,
     pub parents: Vec<u64>,
 }
+/// Semantic axial event ancestry. Heights are deliberately absent from identities.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct AxialSource {
+    pub occurrences: Vec<(u64, u64)>,
+    pub feature: u64,
+    pub region: u64,
+    pub high: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct SectionSignature {
+    pub low: std::collections::BTreeSet<AxialSource>,
+    pub high: std::collections::BTreeSet<AxialSource>,
+    pub regions: Vec<Vec<Vec<crate::planar::SpanKey>>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum OutputSignature {
+    Planar(Vec<Vec<crate::planar::SpanKey>>),
+    Sections(Vec<SectionSignature>),
+}
 #[derive(Debug, Clone)]
 pub struct NativeSolid {
     input: ExtrudeInput,
     body_id: u64,
     topology: Brep,
-    pockets: Vec<cuts::Pocket>,
+    axial: [steps::Level; 2],
     planar: crate::planar::Region,
     planar_named: bool,
     legacy_output_order: bool,
@@ -443,46 +462,79 @@ impl NativeSolid {
         feature: u64,
         instance: u64,
     ) -> Result<Self> {
+        for n in offset {
+            crate::number(n)?;
+        }
         let mut input = self.input.clone();
         for (v, o) in input.origin.iter_mut().zip(offset) {
             *v += o;
         }
         input.feature_id = feature;
-        let mut result = Self::extrude(input)?;
-        result.planar = self.planar.clone();
-        prisms::instance(&mut result.planar, feature, instance);
-        for pocket in &self.pockets {
-            let mut pocket = pocket.clone();
-            for (v, o) in pocket.input.origin.iter_mut().zip(offset) {
-                *v += o;
+        let mut planar = self.planar.clone();
+        prisms::instance(&mut planar, feature, instance);
+        let instance_level = |level: &steps::Level| -> Result<steps::Level> {
+            level
+                .iter()
+                .cloned()
+                .map(|mut source| {
+                    source.occurrences.push((feature, instance));
+                    if source.occurrences.len() > 64 {
+                        return invalid("Axial transform ancestry exceeds 64 instances");
+                    }
+                    Ok(source)
+                })
+                .collect()
+        };
+        let mut result = if let Some(steps) = &self.stepped {
+            let mut base = self.clone();
+            base.input = input;
+            base.planar = planar;
+            let dz = dot(offset, base.input.plane.normal().to_array());
+            let mut slabs = steps.slabs.clone();
+            for slab in &mut slabs {
+                slab.interval = slab.interval.map(|z| z + dz);
+                slab.levels = [
+                    instance_level(&slab.levels[0])?,
+                    instance_level(&slab.levels[1])?,
+                ];
+                for region in &mut slab.occupied.regions {
+                    prisms::instance(region, feature, instance);
+                }
             }
-            prisms::instance(&mut pocket.region, feature, instance);
-            if self.stepped.is_some() {
-                result.pockets.push(pocket);
-            } else {
-                result.append_pocket(pocket)?;
+            steps::build(&base, slabs, feature)?
+        } else {
+            let mut result = Self::extrude(input)?;
+            result.planar = planar;
+            result.axial = [
+                instance_level(&self.axial[0])?,
+                instance_level(&self.axial[1])?,
+            ];
+            if self.planar_named {
+                result.name_planar_topology()?;
             }
-        }
-        if self.stepped.is_some() {
-            result.rebuild_steps(feature)?;
-        }
-        result.provenance = self.provenance.clone();
-        if self.planar_named {
-            result.name_planar_topology()?;
-        }
+            result
+        };
         result.legacy_output_order = self.legacy_output_order;
+        result.provenance = self.provenance.clone();
         result.provenance.push(Provenance {
             feature,
             operation: Operation::NewBody,
-            parents: vec![self.last_feature()],
+            parents: vec![self.last_feature()]
+                .into_iter()
+                .filter(|parent| *parent != feature)
+                .collect(),
         });
+        if result.provenance.len() > 32768 {
+            return invalid("Solid provenance exceeds 32768 operations");
+        }
         Ok(result)
     }
     pub fn topology(&self) -> &Brep {
         &self.topology
     }
-    pub fn planar_region(&self) -> &crate::planar::Region {
-        &self.planar
+    /// Uniform solids alone have one authoritative planar region.
+    pub fn planar_region(&self) -> Option<&crate::planar::Region> {
+        self.stepped.is_none().then_some(&self.planar)
     }
     /// Exact occupied sections for stepped solids; axial coordinates are signed
     /// millimetres along the principal plane normal in world coordinates.
@@ -495,8 +547,13 @@ impl NativeSolid {
                 .collect()
         })
     }
-    pub fn output_signature(&self) -> Option<Vec<Vec<crate::planar::SpanKey>>> {
-        self.planar_named.then(|| self.planar.key())
+    pub fn output_signature(&self) -> Option<OutputSignature> {
+        if let Some(steps) = &self.stepped {
+            Some(OutputSignature::Sections(steps.signature.clone()))
+        } else {
+            self.planar_named
+                .then(|| OutputSignature::Planar(self.planar.key()))
+        }
     }
     pub(crate) fn uses_legacy_output_order(&self) -> bool {
         self.legacy_output_order
@@ -784,11 +841,19 @@ impl NativeSolid {
             input.region_id,
             &ids,
         )?;
+        let axial = [false, true].map(|high| {
+            std::collections::BTreeSet::from([AxialSource {
+                occurrences: vec![],
+                feature,
+                region: input.region_id,
+                high,
+            }])
+        });
         Ok(Self {
             input,
             body_id: 0,
             topology: brep,
-            pockets: vec![],
+            axial,
             planar,
             planar_named: false,
             legacy_output_order: false,
@@ -806,11 +871,6 @@ impl NativeSolid {
         }
         (measure(&self.input.outer).0 - self.input.holes.iter().map(|p| measure(p).0).sum::<f64>())
             * self.input.distance.abs()
-            - self
-                .pockets
-                .iter()
-                .map(|p| p.input.outer.signed_area().abs() * p.input.distance.abs())
-                .sum::<f64>()
     }
     pub fn area(&self) -> f64 {
         if let Some(steps) = &self.stepped {
@@ -819,15 +879,12 @@ impl NativeSolid {
         let (a, p) = measure(&self.input.outer);
         let holes_area: f64 = self.input.holes.iter().map(|p| measure(p).0).sum();
         let holes_perimeter: f64 = self.input.holes.iter().map(|p| measure(p).1).sum();
-        2. * (a - holes_area)
-            + (p + holes_perimeter) * self.input.distance.abs()
-            + self
-                .pockets
-                .iter()
-                .map(|p| p.input.outer.perimeter() * p.input.distance.abs())
-                .sum::<f64>()
+        2. * (a - holes_area) + (p + holes_perimeter) * self.input.distance.abs()
     }
     pub fn bounds(&self) -> [[f64; 3]; 2] {
+        if let Some(steps) = &self.stepped {
+            return steps.bounds(&self.input);
+        }
         let bounds2 = self.input.outer.planar_bounds();
         let points = [
             bounds2[0],
@@ -851,10 +908,8 @@ impl NativeSolid {
     pub fn mesh(&self, segments: usize) -> Result<DisplayMesh> {
         if let Some(steps) = &self.stepped {
             steps.mesh(&self.topology, segments)
-        } else if self.pockets.is_empty() {
-            self.mesh_prism(segments)
         } else {
-            self.mesh_pockets(segments)
+            self.mesh_prism(segments)
         }
     }
     fn mesh_prism(&self, segments: usize) -> Result<DisplayMesh> {
@@ -1052,45 +1107,34 @@ pub fn boolean(
     operation: Operation,
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
-    let same = a.input.plane == b.input.plane
-        && cuts::pockets_equal(a, b)
-        && a.input.origin == b.input.origin
-        && (a.input.distance - b.input.distance).abs() < POLICY.linear_mm
-        && a.input
-            .outer
-            .geometrically_equal(&b.input.outer, POLICY.linear_mm)
-        && a.input.holes.len() == b.input.holes.len()
-        && a.input
-            .holes
-            .iter()
-            .zip(&b.input.holes)
-            .all(|(a, b)| a.geometrically_equal(b, POLICY.linear_mm));
+    if operation == Operation::NewBody {
+        return invalid("New Body is not a Boolean operation");
+    }
+    a.topology.validate()?;
+    b.topology.validate()?;
     let aa = a.bounds();
     let bb = b.bounds();
     let disjoint = (0..3)
         .any(|i| aa[1][i] < bb[0][i] - POLICY.linear_mm || bb[1][i] < aa[0][i] - POLICY.linear_mm);
     let mut result = if let Some(solids) = prisms::boolean(a, b, operation, feature)? {
         solids
-    } else if same {
-        match operation {
-            Operation::Cut => vec![],
-            Operation::Join | Operation::Intersect => vec![a.clone()],
-            _ => return invalid("New Body is not a Boolean operation"),
-        }
+    } else if a.input.plane == b.input.plane {
+        steps::boolean(a, b, operation, feature)?
     } else if disjoint {
         match operation {
             Operation::Cut => vec![a.clone()],
             Operation::Intersect => vec![],
-            Operation::Join => vec![a.clone(), b.clone()],
-            _ => return invalid("New Body is not a Boolean operation"),
-        }
-    } else if operation == Operation::Cut {
-        if let Some(solids) = steps::cut(a, b, feature)? {
-            solids
-        } else if let Some(solids) = cuts::contained_cut(a, b, feature)? {
-            solids
-        } else {
-            box_boolean(a, b, operation, feature)?
+            Operation::Join => [a, b]
+                .into_iter()
+                .map(|s| {
+                    let mut s = s.clone();
+                    // Historical disjoint Join saves assigned bodies by bounds,
+                    // including pocketed operands on different principal axes.
+                    s.legacy_output_order = true;
+                    s
+                })
+                .collect(),
+            _ => unreachable!(),
         }
     } else {
         box_boolean(a, b, operation, feature)?
@@ -1105,7 +1149,11 @@ pub fn boolean(
     parents.retain(|p| *p != feature);
     parents.sort_unstable();
     parents.dedup();
+    if history.len() >= 32768 {
+        return invalid("Solid provenance exceeds 32768 operations");
+    }
     for s in &mut result {
+        s.topology.validate()?;
         s.provenance = history.clone();
         s.provenance.push(Provenance {
             feature,
@@ -1122,8 +1170,8 @@ fn box_boolean(
     feature: u64,
 ) -> Result<Vec<NativeSolid>> {
     if !prisms::rectangular(&a.input.outer)
-        || !a.pockets.is_empty()
-        || !b.pockets.is_empty()
+        || a.stepped.is_some()
+        || b.stepped.is_some()
         || !a.input.holes.is_empty()
         || !prisms::rectangular(&b.input.outer)
         || !b.input.holes.is_empty()

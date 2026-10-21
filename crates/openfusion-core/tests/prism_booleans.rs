@@ -265,7 +265,10 @@ fn tangent_solid_contacts_empty_intersection_and_pocket_safety() {
     )
     .unwrap()
     .remove(0);
-    assert!(native::boolean(&p, &b, Operation::Join, 8).is_err());
+    let joined = native::boolean(&p, &b, Operation::Join, 8).unwrap();
+    assert_eq!(joined.len(), 1);
+    close(joined[0].volume(), 5000. - 8. * std::f64::consts::PI);
+    joined[0].topology().validate().unwrap();
     let mut exhausted = input(disk(0., 10.), vec![], 2);
     exhausted.loop_ids = vec![u64::MAX];
     assert!(NativeSolid::extrude(exhausted).is_err());

@@ -247,6 +247,8 @@ mod tests {
                 Example::Split => (2, 3800.),
                 Example::Annular => (2, 225. * std::f64::consts::PI),
                 Example::Pockets => (1, 36000. - 800. * std::f64::consts::PI + 3. * lens),
+                Example::Breakthrough => (1, 36000. - 1200. * std::f64::consts::PI + 2. * lens),
+                Example::UnequalJoin => (1, 2000. * std::f64::consts::PI - 5. * lens),
             };
             assert_eq!(bodies.len(), count);
             assert!((volume(&response) - expected).abs() < 1e-5);
@@ -270,7 +272,7 @@ mod tests {
         assert_eq!(redo.display_backend, Some(Backend::Rust));
         let accepted = engine.session.document.clone();
         let mut invalid = Example::Pockets.document().unwrap();
-        invalid.extrusions[2].distance = 4.;
+        invalid.extrusions[2].distance = 0.;
         invalid.sketches[2].origin[2] = 0.;
         let rejected = engine.execute(6, Command::Example(invalid), Model::display_mesh);
         assert_eq!(rejected.kind, ResponseKind::Rejected);
@@ -299,7 +301,7 @@ mod tests {
         assert_eq!(committed.display_backend, Some(Backend::Rust));
         let mut invalid = committed.document.clone();
         invalid.sketches[2].origin[2] = 0.;
-        invalid.extrusions[2].distance = 4.;
+        invalid.extrusions[2].distance = 0.;
         let rejected = engine.execute(5, Command::Replace(invalid), Model::display_mesh);
         assert_eq!(rejected.kind, ResponseKind::Rejected);
         assert_eq!(rejected.document, committed.document);
@@ -504,5 +506,67 @@ mod tests {
         assert_eq!(r.save_path, Some(old));
         assert_eq!(r.document, changed);
         assert_eq!(std::fs::read(locked).unwrap(), b"unchanged");
+    }
+    #[test]
+    fn axial_examples_preview_cancel_edit_history_failures_and_save_use_the_native_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        for (example, index, value) in [
+            (Example::Breakthrough, 2, 5.5),
+            (Example::UnequalJoin, 1, 9.),
+        ] {
+            let mut engine = Engine::new();
+            let initial = engine.execute(
+                1,
+                Command::Example(example.document().unwrap()),
+                Model::display_mesh,
+            );
+            let initial_volume = volume(&initial);
+            let path = dir.path().join(format!("{}.ofrust", example.key()));
+            engine.execute(2, Command::Save(path.clone()), Model::display_mesh);
+            let saved = std::fs::read(&path).unwrap();
+            let mut edit = initial.document.clone();
+            edit.extrusions[index].distance = value;
+            let preview = engine.execute(3, Command::Preview(edit.clone()), Model::display_mesh);
+            assert_eq!(preview.kind, ResponseKind::Preview);
+            assert_eq!(preview.display_backend, Some(Backend::Rust));
+            assert_eq!(preview.document, initial.document);
+            assert_eq!(preview.save_path, Some(path.clone()));
+            let restored = engine.execute(4, Command::ResetPreview, Model::display_mesh);
+            assert_eq!(
+                restored.display.as_ref().unwrap().0.vertices,
+                initial.display.as_ref().unwrap().0.vertices
+            );
+            let committed = engine.execute(5, Command::Replace(edit), Model::display_mesh);
+            assert_eq!(committed.kind, ResponseKind::Commit);
+            let edited_volume = volume(&committed);
+            assert!((edited_volume - initial_volume).abs() > 1.);
+            let fail = |_: &Model| {
+                Err(fission180_core::Error::Invalid(
+                    "injected axial mesh failure".into(),
+                ))
+            };
+            let mut candidate = committed.document.clone();
+            candidate.extrusions[index].distance = value - 0.25;
+            let rejected = engine.execute(6, Command::Replace(candidate), fail);
+            assert_eq!(rejected.kind, ResponseKind::Rejected);
+            assert_eq!(rejected.document, committed.document);
+            assert!(rejected.display.is_none());
+            assert_eq!(rejected.save_path, Some(path.clone()));
+            let mut invalid = committed.document.clone();
+            invalid.extrusions[index].distance = 0.;
+            let rejected = engine.execute(7, Command::Replace(invalid), Model::display_mesh);
+            assert_eq!(rejected.kind, ResponseKind::Rejected);
+            assert_eq!(rejected.document, committed.document);
+            assert!(rejected.can_undo && rejected.dirty);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            let undone = engine.execute(8, Command::Undo, Model::display_mesh);
+            assert!((volume(&undone) - initial_volume).abs() < 1e-5);
+            let redone = engine.execute(9, Command::Redo, Model::display_mesh);
+            assert!((volume(&redone) - edited_volume).abs() < 1e-5);
+            engine.execute(10, Command::Save(path.clone()), Model::display_mesh);
+            let reopened = engine.execute(11, Command::Open(path), Model::display_mesh);
+            assert_eq!(reopened.document, committed.document);
+            assert!((volume(&reopened) - edited_volume).abs() < 1e-5);
+        }
     }
 }

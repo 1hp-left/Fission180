@@ -66,7 +66,7 @@ pub(super) fn boolean(
     op: Operation,
     feature: u64,
 ) -> Result<Option<Vec<NativeSolid>>> {
-    if !a.pockets.is_empty() || !b.pockets.is_empty() || a.input.plane != b.input.plane {
+    if a.stepped.is_some() || b.stepped.is_some() || a.input.plane != b.input.plane {
         return Ok(None);
     }
     let aa = cuts::interval(&a.input);
@@ -121,6 +121,7 @@ pub(super) fn boolean(
         input.loop_ids = (1..=input.holes.len() as u64 + 1).collect();
         let mut solid = NativeSolid::extrude(input)?;
         solid.planar = region;
+        solid.axial = a.axial.clone();
         // Existing v5 box results persist IDs in bounding-box order. Keep that
         // contract for rectangular outputs; source keys still guard edits and
         // identify every edge/face. Newly supported curved outputs use ancestry.

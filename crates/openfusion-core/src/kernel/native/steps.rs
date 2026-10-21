@@ -1,15 +1,12 @@
-//! Bounded same-cap overlapping blind cuts as exact occupied axial sections.
-//! Each patch is analytic; interfaces are removed and shared edges are welded.
+//! Analytic occupied-section Booleans for parallel principal extrusion axes.
+//! Connectivity and measurements use exact planar regions, never display meshes.
 use super::*;
 use crate::planar::{self, Boolean, Region, RegionSet};
 use std::collections::{BTreeSet, HashSet};
 
-#[derive(Debug, Clone, Serialize)]
-enum Level {
-    Low,
-    High,
-    Floors(Vec<u64>),
-}
+pub(super) const MAX_LEVELS: usize = 64;
+const MAX_CELLS: usize = 512;
+pub(super) type Level = BTreeSet<AxialSource>;
 #[derive(Debug, Clone, Serialize)]
 enum Kind {
     Sides(Level, Level),
@@ -30,6 +27,7 @@ struct Part {
 #[derive(Debug, Clone)]
 pub(super) struct Slab {
     pub interval: [f64; 2],
+    pub levels: [Level; 2],
     pub occupied: RegionSet,
 }
 #[derive(Debug, Clone)]
@@ -37,6 +35,7 @@ pub(super) struct Stepped {
     pub volume: f64,
     pub area: f64,
     pub slabs: Vec<Slab>,
+    pub signature: Vec<SectionSignature>,
     parts: Vec<Part>,
 }
 fn axes(plane: Plane) -> [usize; 2] {
@@ -46,242 +45,406 @@ fn axes(plane: Plane) -> [usize; 2] {
         Plane::YZ => [1, 2],
     }
 }
-pub(super) fn cut(
+fn sections(s: &NativeSolid, origin: [f64; 3]) -> Vec<Slab> {
+    let delta = axes(s.input.plane).map(|i| s.input.origin[i] - origin[i]);
+    let slabs = s.stepped.as_ref().map_or_else(
+        || {
+            vec![Slab {
+                interval: cuts::interval(&s.input),
+                levels: s.axial.clone(),
+                occupied: RegionSet {
+                    regions: vec![s.planar.clone()],
+                },
+            }]
+        },
+        |steps| steps.slabs.clone(),
+    );
+    slabs
+        .into_iter()
+        .map(|mut slab| {
+            slab.occupied.regions = slab
+                .occupied
+                .regions
+                .iter()
+                .map(|r| prisms::shifted(r, delta))
+                .collect();
+            slab
+        })
+        .collect()
+}
+fn validate_budget(slabs: &[Slab]) -> Result<()> {
+    let mut cells = 0;
+    let mut lineage = 0;
+    for slab in slabs {
+        cells += slab.occupied.regions.len();
+        for level in &slab.levels {
+            lineage += level.iter().map(|s| 1 + s.occurrences.len()).sum::<usize>();
+        }
+        for span in slab
+            .occupied
+            .regions
+            .iter()
+            .flat_map(Region::loops)
+            .flat_map(|l| &l.spans)
+        {
+            lineage += span.ancestry.len() + span.start.len() + span.end.len();
+        }
+        if cells > MAX_CELLS {
+            return invalid("Section Boolean exceeds 512 occupied cells");
+        }
+        if lineage > 32768 {
+            return invalid("Section provenance exceeds 32768 records");
+        }
+    }
+    Ok(())
+}
+/// Partition both operands at their actual occupied axial events, retaining gaps.
+pub(super) fn boolean(
     a: &NativeSolid,
     b: &NativeSolid,
+    op: Operation,
     feature: u64,
-) -> Result<Option<Vec<NativeSolid>>> {
-    if (a.pockets.is_empty() && b.input.holes.is_empty())
-        || !b.pockets.is_empty()
-        || a.input.plane != b.input.plane
-    {
-        return Ok(None);
-    }
-    let Some(mut tool) = cuts::reframe(&a.input, &b.input) else {
-        return Ok(None);
-    };
-    let target = cuts::interval(&a.input);
-    let cutter = cuts::interval(&tool);
-    let lo = target[0].max(cutter[0]);
-    let hi = target[1].min(cutter[1]);
-    if hi - lo <= POLICY.linear_mm {
-        return Ok(Some(vec![a.clone()]));
-    }
-    let through =
-        cutter[0] <= target[0] + POLICY.linear_mm && cutter[1] >= target[1] - POLICY.linear_mm;
-    let overlaps = a
-        .pockets
-        .iter()
-        .any(|p| !cuts::disjoint(&p.input.outer, &tool.outer));
-    if a.stepped.is_none() && ((!overlaps && b.input.holes.is_empty()) || through) {
-        return Ok(None);
-    }
-    if through
-        && tool.holes.is_empty()
-        && (crate::region::strictly_contains(&tool.outer, &a.input.outer)
-            || tool
-                .outer
-                .geometrically_equal(&a.input.outer, POLICY.linear_mm))
-    {
-        return Ok(Some(vec![]));
-    }
-    if !crate::region::strictly_contains(&a.input.outer, &tool.outer) {
-        return invalid("Overlapping blind cuts must be strictly inside the target sidewall");
-    }
-    if a.input
-        .holes
-        .iter()
-        .any(|h| !cuts::disjoint(h, &tool.outer))
-    {
+) -> Result<Vec<NativeSolid>> {
+    if a.input.plane != b.input.plane {
         return invalid(
-            "Overlapping blind cuts touching/intersecting through-holes are unsupported",
+            "Rust section Boolean requires parallel principal axes; no OCCT fallback occurred",
         );
     }
-    let delta = axes(a.input.plane).map(|i| b.input.origin[i] - a.input.origin[i]);
-    let region = prisms::shifted(&b.planar, delta);
-    if through {
-        if !tool.holes.is_empty() || overlaps {
-            return invalid("Through-cuts interacting with stepped pockets are unsupported");
-        }
-        let mut result = a.clone();
-        result.input.holes.push(tool.outer);
-        let next = result
-            .input
-            .loop_ids
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| crate::Error::Invalid("Topology loop identities exhausted".into()))?;
-        result.input.loop_ids.push(next);
-        let mut hole = region.outer;
-        hole.spans = hole
-            .spans
-            .iter()
-            .rev()
-            .map(planar::Span::reversed)
-            .collect();
-        result.planar.holes.push(hole);
-        result.rebuild_steps(feature)?;
-        return Ok(Some(vec![result]));
-    }
-    let enters_low = cutter[0] <= target[0] + POLICY.linear_mm;
-    let enters_high = cutter[1] >= target[1] - POLICY.linear_mm;
-    if enters_low == enters_high {
-        return invalid(
-            "Overlapping blind cut must enter one end cap; enclosed cavities are unsupported",
-        );
-    }
-    let (floor, opening) = if enters_high {
-        (lo, target[1])
-    } else {
-        (hi, target[0])
+    a.topology.validate()?;
+    b.topology.validate()?;
+    let operation = match op {
+        Operation::Join => Boolean::Union,
+        Operation::Cut => Boolean::Difference,
+        Operation::Intersect => Boolean::Intersection,
+        _ => return invalid("New Body is not a Boolean operation"),
     };
-    let normal = a.input.plane.normal().to_array();
-    let start = dot(a.input.origin, normal);
-    let opening_cap = usize::from((opening - start).abs() > POLICY.linear_mm);
-    if a.pockets.iter().any(|p| p.opening_cap != opening_cap) {
-        return invalid("Opposite-side overlapping pocket interactions are unsupported");
-    }
-    if a.pockets.len() >= 32 {
-        return invalid("Overlapping blind cuts exceed the 32-pocket section limit");
-    }
-    tool.feature_id = feature;
-    tool.distance = opening - floor;
-    tool.origin = std::array::from_fn(|i| a.input.origin[i] + normal[i] * (floor - start));
-    let mut result = a.clone();
-    result.pockets.push(cuts::Pocket {
-        input: tool,
-        opening_cap,
-        region,
-    });
-    result.rebuild_steps(feature)?;
-    Ok(Some(vec![result]))
-}
-impl NativeSolid {
-    pub(super) fn rebuild_steps(&mut self, feature: u64) -> Result<()> {
-        let target = cuts::interval(&self.input);
-        let mut levels = vec![target[0], target[1]];
-        for p in &self.pockets {
-            levels.push(dot(p.input.origin, self.input.plane.normal().to_array()));
+    let left = sections(a, a.input.origin);
+    let right = sections(b, a.input.origin);
+    let mut events: Vec<_> = left
+        .iter()
+        .chain(&right)
+        .flat_map(|s| (0..2).map(|i| (s.interval[i], s.levels[i].clone())))
+        .collect();
+    events.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut levels: Vec<(f64, Level)> = vec![];
+    for (z, sources) in events {
+        if let Some(last) = levels.last_mut() {
+            let gap = z - last.0;
+            if gap <= POLICY.linear_mm {
+                last.1.extend(sources);
+                continue;
+            }
+            if gap < planar::RESOLUTION_MM {
+                return invalid("Distinct axial events are closer than 0.00001 mm");
+            }
         }
-        levels.sort_by(f64::total_cmp);
-        let mut z: Vec<f64> = vec![];
-        for value in levels {
-            if let Some(last) = z.last() {
-                let gap = (value - last).abs();
-                if gap <= POLICY.linear_mm {
-                    continue;
-                }
-                if gap < planar::RESOLUTION_MM {
-                    return invalid("Pocket floors are closer than 0.00001 mm");
+        levels.push((z, sources));
+        if levels.len() > MAX_LEVELS {
+            return invalid("Section Boolean exceeds 64 axial levels");
+        }
+    }
+    if levels.iter().map(|(_, s)| s.len()).sum::<usize>() > 32768 {
+        return invalid("Axial provenance exceeds 32768 records");
+    }
+    // A cut cannot move its target's exterior caps. A tool ending exactly on
+    // either cap has the same opening as one extending beyond it; its redundant
+    // endpoint must not rename an otherwise unchanged pocket.
+    if operation == Boolean::Difference {
+        for (z, sources) in &mut levels {
+            for (slab, end) in [(&left[0], 0), (left.last().unwrap(), 1)] {
+                if (*z - slab.interval[end]).abs() <= POLICY.linear_mm {
+                    *sources = slab.levels[end].clone();
                 }
             }
-            z.push(value);
         }
-        let level = |height: f64| -> Level {
-            if (height - target[0]).abs() <= POLICY.linear_mm {
-                return Level::Low;
+    }
+    let empty = RegionSet::default();
+    let at = |slabs: &[Slab], z: f64| {
+        slabs
+            .iter()
+            .position(|s| z > s.interval[0] && z < s.interval[1])
+    };
+    let mut slabs = vec![];
+    for w in levels.windows(2) {
+        let mid = (w[0].0 + w[1].0) * 0.5;
+        let l = at(&left, mid).map_or(&empty, |i| &left[i].occupied);
+        let r = at(&right, mid).map_or(&empty, |i| &right[i].occupied);
+        // Empty operands need no new arrangement or artificial provenance.
+        let occupied = if l.regions.is_empty() {
+            if operation == Boolean::Union {
+                r.clone()
+            } else {
+                empty.clone()
             }
-            if (height - target[1]).abs() <= POLICY.linear_mm {
-                return Level::High;
+        } else if r.regions.is_empty() {
+            if operation == Boolean::Intersection {
+                empty.clone()
+            } else {
+                l.clone()
             }
-            let mut ids: Vec<_> = self
-                .pockets
-                .iter()
-                .filter(|p| {
-                    (dot(p.input.origin, self.input.plane.normal().to_array()) - height).abs()
-                        <= POLICY.linear_mm
+        } else {
+            l.boolean(r, operation)?
+        };
+        slabs.push(Slab {
+            interval: [w[0].0, w[1].0],
+            levels: [w[0].1.clone(), w[1].1.clone()],
+            occupied,
+        });
+    }
+    validate_budget(&slabs)?;
+    let mut result = components(a, slabs, feature)?;
+    // Preserve v5 box split/disjoint Join body ordering, even across axial gaps.
+    let aa = a.bounds();
+    let bb = b.bounds();
+    let legacy = (op == Operation::Join
+        && (0..3).any(|i| {
+            aa[1][i] < bb[0][i] - POLICY.linear_mm || bb[1][i] < aa[0][i] - POLICY.linear_mm
+        }))
+        || (a.stepped.is_none()
+            && b.stepped.is_none()
+            && a.input.holes.is_empty()
+            && b.input.holes.is_empty()
+            && prisms::rectangular(&a.input.outer)
+            && prisms::rectangular(&b.input.outer)
+            && result.iter().all(|s| {
+                let sections = &s.stepped.as_ref().unwrap().slabs;
+                let bounds = sections[0].occupied.regions[0]
+                    .outer
+                    .profile()
+                    .planar_bounds();
+                sections.iter().all(|slab| {
+                    slab.occupied.regions.len() == 1
+                        && slab.occupied.regions[0].holes.is_empty()
+                        && prisms::rectangular(&slab.occupied.regions[0].outer.profile())
+                        && slab.occupied.regions[0]
+                            .outer
+                            .profile()
+                            .planar_bounds()
+                            .iter()
+                            .flatten()
+                            .zip(bounds.iter().flatten())
+                            .all(|(a, b)| (a - b).abs() <= POLICY.linear_mm)
                 })
-                .map(|p| p.input.feature_id)
-                .collect();
-            ids.sort_unstable();
-            ids.dedup();
-            Level::Floors(ids)
-        };
-        let base = RegionSet {
-            regions: vec![self.planar.clone()],
-        };
-        base.validate()?;
-        let mut slabs = vec![];
-        for w in z.windows(2) {
-            let mid = (w[0] + w[1]) * 0.5;
-            let mut occupied = base.clone();
-            for pocket in &self.pockets {
-                let interval = cuts::interval(&pocket.input);
-                if mid > interval[0] && mid < interval[1] {
-                    occupied = occupied.boolean(
-                        &RegionSet {
-                            regions: vec![pocket.region.clone()],
-                        },
-                        Boolean::Difference,
-                    )?;
+            }));
+    let mut signatures = BTreeSet::new();
+    for s in &mut result {
+        s.legacy_output_order = legacy;
+        if !signatures.insert(s.output_signature()) {
+            return invalid("Section output identity collision; repair dependencies explicitly");
+        }
+    }
+    result.sort_by_key(NativeSolid::output_signature);
+    Ok(result)
+}
+fn components(base: &NativeSolid, slabs: Vec<Slab>, feature: u64) -> Result<Vec<NativeSolid>> {
+    let cells: Vec<_> = slabs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, s)| (0..s.occupied.regions.len()).map(move |j| (i, j)))
+        .collect();
+    if cells.len() > MAX_CELLS {
+        return invalid("Section Boolean exceeds 512 occupied cells");
+    }
+    let mut adjacency = vec![vec![]; cells.len()];
+    for (u, &(i, j)) in cells.iter().enumerate() {
+        for (v, &(k, l)) in cells.iter().enumerate().skip(u + 1) {
+            if k != i + 1 {
+                continue;
+            }
+            let a = RegionSet {
+                regions: vec![slabs[i].occupied.regions[j].clone()],
+            };
+            let b = RegionSet {
+                regions: vec![slabs[k].occupied.regions[l].clone()],
+            };
+            let overlap = a.boolean(&b, Boolean::Intersection)?;
+            if !overlap.regions.is_empty() {
+                adjacency[u].push(v);
+                adjacency[v].push(u);
+            } else {
+                // At a shared height, boundary-only attachment is nonmanifold.
+                // A regular planar union has two islands iff they are separated.
+                if a.boolean(&b, Boolean::Union)?.regions.len() != 2 {
+                    return invalid(
+                        "Section solids have only point/edge contact at an axial event",
+                    );
                 }
             }
-            if occupied.regions.is_empty() {
-                return invalid("A blind pocket removed an entire axial section");
+        }
+    }
+    let mut seen = vec![false; cells.len()];
+    let mut result = vec![];
+    for first in 0..cells.len() {
+        if seen[first] {
+            continue;
+        }
+        let mut members = BTreeSet::new();
+        let mut pending = vec![first];
+        while let Some(u) = pending.pop() {
+            if !seen[u] {
+                seen[u] = true;
+                members.insert(cells[u]);
+                pending.extend(&adjacency[u]);
             }
-            slabs.push(Slab {
-                interval: [w[0], w[1]],
-                occupied,
+        }
+        let mut component = vec![];
+        for (i, slab) in slabs.iter().enumerate() {
+            let mut slab = slab.clone();
+            slab.occupied.regions = slab
+                .occupied
+                .regions
+                .into_iter()
+                .enumerate()
+                .filter_map(|(j, r)| members.contains(&(i, j)).then_some(r))
+                .collect();
+            if !slab.occupied.regions.is_empty() {
+                component.push(slab);
+            }
+        }
+        result.push(build(base, component, feature)?);
+    }
+    Ok(result)
+}
+pub(super) fn build(base: &NativeSolid, slabs: Vec<Slab>, feature: u64) -> Result<NativeSolid> {
+    if slabs.is_empty() || slabs.len() >= MAX_LEVELS {
+        return invalid("Invalid occupied section count");
+    }
+    validate_budget(&slabs)?;
+    let mut patches = vec![];
+    let mut volume = 0.;
+    let mut area = 0.;
+    let mut signature = vec![];
+    for slab in &slabs {
+        slab.occupied.validate()?;
+        let length = slab.interval[1] - slab.interval[0];
+        if length < planar::RESOLUTION_MM {
+            return invalid("Unresolved axial section");
+        }
+        volume += slab.occupied.area() * length;
+        let mut regions: Vec<_> = slab.occupied.regions.iter().map(Region::key).collect();
+        regions.sort();
+        signature.push(SectionSignature {
+            low: slab.levels[0].clone(),
+            high: slab.levels[1].clone(),
+            regions,
+        });
+        for region in &slab.occupied.regions {
+            area += region.perimeter() * length;
+            patches.push(Patch {
+                region: region.clone(),
+                lo: slab.interval[0],
+                hi: slab.interval[1],
+                kind: Kind::Sides(slab.levels[0].clone(), slab.levels[1].clone()),
             });
         }
-        let mut patches = vec![];
-        let mut volume = 0.;
-        let mut area = 0.;
-        for slab in &slabs {
-            let length = slab.interval[1] - slab.interval[0];
-            volume += slab.occupied.area() * length;
-            for region in &slab.occupied.regions {
-                area += region.perimeter() * length;
-                patches.push(Patch {
-                    region: region.clone(),
-                    lo: slab.interval[0],
-                    hi: slab.interval[1],
-                    kind: Kind::Sides(level(slab.interval[0]), level(slab.interval[1])),
-                });
+    }
+    let mut cap = |set: RegionSet, height: f64, level: Level, down: bool| {
+        area += set.area();
+        for region in set.regions {
+            patches.push(Patch {
+                region,
+                lo: height,
+                hi: height,
+                kind: Kind::Cap(level.clone(), down),
+            });
+        }
+    };
+    cap(
+        slabs[0].occupied.clone(),
+        slabs[0].interval[0],
+        slabs[0].levels[0].clone(),
+        true,
+    );
+    let last = slabs.last().unwrap();
+    cap(
+        last.occupied.clone(),
+        last.interval[1],
+        last.levels[1].clone(),
+        false,
+    );
+    for pair in slabs.windows(2) {
+        if (pair[0].interval[1] - pair[1].interval[0]).abs() > POLICY.linear_mm {
+            return invalid("Disconnected axial intervals in one solid");
+        }
+        let below = &pair[0].occupied;
+        let above = &pair[1].occupied;
+        let height = pair[0].interval[1];
+        let level = pair[0].levels[1].clone();
+        cap(
+            below.boolean(above, Boolean::Difference)?,
+            height,
+            level.clone(),
+            false,
+        );
+        cap(
+            above.boolean(below, Boolean::Difference)?,
+            height,
+            level,
+            true,
+        );
+    }
+    let mut regions: Vec<_> = patches.iter().map(|p| p.region.clone()).collect();
+    planar::refine_sections(&mut regions)?;
+    // Refinement may add junction ancestry; apply the same retained provenance
+    // policy to the exposed patches before serializing their topology keys.
+    let mut lineage = 0;
+    for region in &regions {
+        for span in region.loops().flat_map(|l| &l.spans) {
+            if span.start.len() > planar::MAX_CURVES || span.end.len() > planar::MAX_CURVES {
+                return invalid("Section junction ancestry exceeds 512 source pairs");
+            }
+            lineage += span.ancestry.len() + span.start.len() + span.end.len();
+        }
+        if lineage > 32768 {
+            return invalid("Exposed section provenance exceeds 32768 records");
+        }
+    }
+    for (patch, region) in patches.iter_mut().zip(regions) {
+        patch.region = region;
+    }
+    let (topology, parts) = assemble(base, &patches, feature)?;
+    // Reject multiple boundary shells (including enclosed cavities), pinches,
+    // orientation errors and unmatched interfaces before publishing any result.
+    topology.validate().map_err(|error| {
+        crate::Error::Invalid(format!("Rust section boundary unsupported: {error}"))
+    })?;
+    if !volume.is_finite() || volume <= 0. || !area.is_finite() || area <= 0. {
+        return invalid("Invalid stepped analytic measurements");
+    }
+    let mut result = base.clone();
+    result.topology = topology;
+    result.axial = [slabs[0].levels[0].clone(), last.levels[1].clone()];
+    result.stepped = Some(Stepped {
+        volume,
+        area,
+        slabs,
+        signature,
+        parts,
+    });
+    result.planar_named = false;
+    result.legacy_output_order = false;
+    Ok(result)
+}
+impl Stepped {
+    pub(super) fn bounds(&self, input: &ExtrudeInput) -> [[f64; 3]; 2] {
+        let normal = input.plane.normal().to_array();
+        let start = dot(input.origin, normal);
+        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+        for slab in &self.slabs {
+            for r in &slab.occupied.regions {
+                for p in r.outer.spans.iter().flat_map(|s| s.curve.extrema()) {
+                    let p = input.plane.point(p, input.origin).to_array();
+                    for z in slab.interval {
+                        for i in 0..3 {
+                            let v = p[i] + normal[i] * (z - start);
+                            bounds[0][i] = bounds[0][i].min(v);
+                            bounds[1][i] = bounds[1][i].max(v);
+                        }
+                    }
+                }
             }
         }
-        let mut cap = |set: RegionSet, height: f64, down: bool| {
-            area += set.area();
-            for region in set.regions {
-                patches.push(Patch {
-                    region,
-                    lo: height,
-                    hi: height,
-                    kind: Kind::Cap(level(height), down),
-                });
-            }
-        };
-        cap(slabs[0].occupied.clone(), target[0], true);
-        cap(slabs.last().unwrap().occupied.clone(), target[1], false);
-        for pair in slabs.windows(2) {
-            let below = &pair[0].occupied;
-            let above = &pair[1].occupied;
-            let height = pair[0].interval[1];
-            cap(below.boolean(above, Boolean::Difference)?, height, false);
-            cap(above.boolean(below, Boolean::Difference)?, height, true);
-        }
-        let mut regions: Vec<_> = patches.iter().map(|p| p.region.clone()).collect();
-        planar::refine_sections(&mut regions)?;
-        for (patch, region) in patches.iter_mut().zip(regions) {
-            patch.region = region;
-        }
-        let (topology, parts) = assemble(self, &patches, feature)?;
-        topology.validate()?;
-        if !volume.is_finite() || volume <= 0. || !area.is_finite() || area <= 0. {
-            return invalid("Invalid stepped analytic measurements");
-        }
-        self.topology = topology;
-        self.stepped = Some(Stepped {
-            volume,
-            area,
-            slabs,
-            parts,
-        });
-        self.planar_named = false;
-        Ok(())
+        bounds
     }
 }
 fn assemble(base: &NativeSolid, patches: &[Patch], feature: u64) -> Result<(Brep, Vec<Part>)> {

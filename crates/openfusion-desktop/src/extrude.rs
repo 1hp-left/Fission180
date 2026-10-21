@@ -464,4 +464,43 @@ mod tests {
         );
         assert_eq!(session.document, accepted);
     }
+    #[test]
+    fn native_editor_preserves_new_axial_example_references_during_depth_edits() {
+        for (example, index, value) in [
+            (crate::engine_examples::Example::Breakthrough, 2, "5.5 mm"),
+            (crate::engine_examples::Example::UnequalJoin, 1, "9 mm"),
+        ] {
+            let mut session = Session::new(example.document().unwrap()).unwrap();
+            let original = session.document.extrusions[index].clone();
+            let dialog = ExtrudeDialog {
+                editing: Some(original.id),
+                sketch_id: original.sketch_id,
+                profile: 0,
+                distance: value.into(),
+                operation: original.operation,
+                body_id: original.body_id,
+                last_preview: String::new(),
+                input: fission180_core::expression::DraftInput::new(
+                    value.into(),
+                    &session.document.parameters,
+                ),
+                options: original.options.clone(),
+            };
+            let edited = edited_document(&session.document, &dialog).unwrap();
+            assert_eq!(
+                edited.extrusions[index].boundary_dependencies,
+                original.boundary_dependencies
+            );
+            assert_eq!(
+                edited.extrusions[index].result_body_ids,
+                original.result_body_ids
+            );
+            session
+                .replace_with_display(edited, Model::display_mesh)
+                .unwrap();
+            assert_eq!(session.model.bodies.len(), 1);
+            session.undo().unwrap();
+            session.redo().unwrap();
+        }
+    }
 }

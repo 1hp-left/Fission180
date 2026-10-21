@@ -4,6 +4,14 @@ Started: 2026-10-18. Updated: 2026-10-20. Target: Autodesk Fusion, previously ca
 
 ## Current status: installed Fusion and native Rust reconstruction
 
+[Generalized same-axis solid Booleans](axial-booleans-2026-10-20.md) extends
+occupied sections to Cut/Join/Intersect of unequal-height and already stepped
+operands, blind sidewall notches, interacting through-cuts, opposite-cap
+breakthroughs and disconnected axial outputs. It adds two editable native Rust
+examples and retains explicit topology/transaction limits. Analytic and separately
+built OCCT checks are independent implementation evidence; Fusion parity remains
+unverified.
+
 [Rust engine desktop integration](desktop-engine-2026-10-20.md) exposes editable
 Rust examples in the File menu, actual displayed-engine status, measured backend
 tags and native worker/viewport checks. It preserves preview/undo/file safety

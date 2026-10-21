@@ -399,7 +399,7 @@ impl FusionApp {
                 app.load_engine_example(example);
             } else {
                 app.error = Some(
-                    "Choose an engine example: notch, join, intersect, split, annular, pockets"
+                    "Choose an engine example: notch, join, intersect, split, annular, pockets, breakthrough, boss"
                         .into(),
                 );
             }

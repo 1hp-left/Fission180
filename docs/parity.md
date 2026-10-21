@@ -43,6 +43,13 @@ These are pending comparison protocols, not completed tests. Link each completed
 
 ## Independent engine phase — 2026-10-20
 
+[Generalized axial Booleans](axial-booleans-2026-10-20.md) now support parallel
+principal-axis Cut/Join/Intersect over unequal and already stepped occupied
+sections, including opposite-cap breakthroughs, blind sidewall cuts and axial
+splits. Two additional editable native examples use the ordinary worker and
+Extrude editor. Analytic/OCCT, source identity and rollback checks are independent
+Fission evidence; no matching Fusion runtime or UI parity is claimed.
+
 [Desktop engine integration](desktop-engine-2026-10-20.md) makes the independent
 Rust engine directly testable in the native application with six editable
 examples, explicit engine status, live command replay and worker rollback tests.
@@ -50,8 +57,10 @@ Native captures verify the Fission display path separately from Fusion parity.
 
 [Overlapping same-cap blind pockets](overlapping-pockets-2026-10-20.md) use exact
 occupied sections and shared stepped topology, including unequal depths,
-annular pockets and preserved disjoint through-holes. Unsupported opposite-side,
-sidewall and nonparallel interactions fail transactionally. Measurements and
+annular pockets and preserved disjoint through-holes. That historical batch
+rejected opposite-side and sidewall interactions; the generalized axial extension
+above now supports regular same-axis cases.
+Nonparallel curved interactions still fail transactionally. Measurements and
 OCCT agreement are independent implementation evidence, not Fusion parity.
 
 [Analytic planar and same-axis prism Booleans](planar-prisms-2026-10-20.md) adds
